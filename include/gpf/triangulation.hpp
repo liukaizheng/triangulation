@@ -967,6 +967,24 @@ triangulate_with_new_points(std::span<const double> points, std::span<const std:
     return triangulate_with_new_points(points, segments, segments.size() / 2, is_horizontal);
 }
 
+[[nodiscard]] inline auto trianulate_mesh(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+{
+    using namespace triangulation;
+    auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);
+    set_boundary_vertex_halfedges(mesh, bdy_hid);
+    for (auto v : mesh.vertices()) {
+        v.prop().pt = { v.id.idx };
+    }
+
+    CDT cdt;
+    cdt.points = points;
+    cdt.segments = segments;
+    cdt.mesh = std::move(mesh);
+
+    cdt.perform();
+    return cdt.mesh;
+}
+
 // Helper: unique indices deduplication
 [[nodiscard]] inline std::pair<std::vector<std::size_t>, std::vector<std::size_t>>
 unique_indices(std::span<const std::size_t> indices)
