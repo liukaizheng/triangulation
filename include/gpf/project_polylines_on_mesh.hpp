@@ -1097,7 +1097,7 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                 continue;
             }
             auto local_path = flip_geodesic.perform(detail::shortest_patch_by_dijksta(
-              aux_mesh, va, vb, [](auto e) { return e.prop().locked; }, [](auto e) { return e.prop().len; }));
+              aux_mesh, va, vb, [](auto e) { return false; }, [](auto e) { return e.prop().len; }));
             for (const auto hid : std::move(local_path)) {
                 trace.trace_from_vertex(hid);
             }
