@@ -1,7 +1,6 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <concepts>
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -555,19 +554,6 @@ shortest_patch_by_dijksta(const Mesh& mesh,
     return {};
 }
 
-inline auto
-triangle_oppo_point(const double lab, const double lbc, const double lca, bool reversed)
-{
-    const auto h = gpf::triangle_area(lab, lbc, lca) / lab * 2.0;
-    if (reversed) {
-        auto w = (lbc * lbc + lab * lab - lca * lca) / lab * 0.5;
-        return Eigen::Vector2d{ w, -h };
-    } else {
-        const auto w = (lca * lca + lab * lab - lbc * lbc) / lab * 0.5;
-        return Eigen::Vector2d{ w, h };
-    }
-}
-
 struct FlipGeodesic
 {
     enum class TurnDirection
@@ -752,8 +738,8 @@ FlipGeodesic::flip(const gpf::HalfedgeId hid) const
     auto lca = mesh->halfedge(hca).edge().prop().len;
 
     Eigen::Vector2d pa{ lca, 0.0 };
-    auto pb = triangle_oppo_point(lca, lab, lbc, false);
-    auto pd = triangle_oppo_point(lca, lcd, lda, true);
+    auto pb = triangle_apex_from_base_lengths(lca, lab, lbc, false);
+    auto pd = triangle_apex_from_base_lengths(lca, lcd, lda, true);
 
     auto left_area = pd.cross(pb); // pc = {0.0, 0.0}
     auto right_area = (pb - pa).cross(pd - pa);
@@ -910,7 +896,7 @@ TracePolyline<N, Mesh>::trace_from_vertex(gpf::HalfedgeId start_hid)
 
             Vector2d pa{ lab, 0.0 };
             constexpr std::array<double, 2> pb{ { 0.0, 0.0 } };
-            Vector2d pc = triangle_oppo_point(lab, lbc, lca, true);
+            Vector2d pc = triangle_apex_from_base_lengths(lab, lbc, lca, true);
             std::array<double, 2> dir_arr;
             auto dir = Vector2d::Map(dir_arr.data());
             dir = Eigen::Rotation2D<double>(angle) * (pa - pc).normalized();
@@ -1004,7 +990,7 @@ TracePolyline<N, Mesh>::trace_from_edge(gpf::HalfedgeId hab, const double* dir_d
 
             Vector2d pa{ 0.0, 0.0 };
             Vector2d pb{ lab, 0.0 };
-            Vector2d pc = triangle_oppo_point(lab, lbc, lca, false);
+            Vector2d pc = triangle_apex_from_base_lengths(lab, lbc, lca, false);
             double t = edge_points.back().t;
             if (he_ab.edge().halfedge().id != he_ab.id) {
                 t = 1.0 - t;

@@ -6,17 +6,39 @@
 #include <cstddef>
 #include <numbers>
 #include <span>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 
 #include <gpf/handles.hpp>
 
+#include <Eigen/Dense>
+
 namespace gpf {
 
-constexpr double
+inline double
 triangle_area(const double lab, const double lbc, const double lca) noexcept
 {
     const double s = (lab + lbc + lca) / 2.0;
     return std::sqrt(std::max(0.0, s * (s - lab) * (s - lbc) * (s - lca)));
 }
+
+inline auto
+triangle_apex_from_base_lengths(const double lab, const double lbc, const double lca, bool reversed) noexcept
+{
+    const auto h = triangle_area(lab, lbc, lca) / lab * 2.0;
+    if (reversed) {
+        auto w = (lbc * lbc + lab * lab - lca * lca) / lab * 0.5;
+        return Eigen::Vector2d{ w, -h };
+    } else {
+        const auto w = (lca * lca + lab * lab - lbc * lbc) / lab * 0.5;
+        return Eigen::Vector2d{ w, h };
+    }
+}
+
+template<typename Mesh>
+inline constexpr std::size_t mesh_position_dim_v =
+  std::tuple_size_v<std::remove_cvref_t<decltype(std::declval<Mesh&>().vertex_prop(VertexId{ 0 }).pt)>>;
 
 // Concept for vertex with position property that can be viewed as span<const double, N>
 template<typename V, std::size_t N>
