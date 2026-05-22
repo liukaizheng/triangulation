@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <gpf/ids.hpp>
 #include <limits>
 #include <numeric>
 #include <queue>
@@ -141,6 +143,26 @@ struct FaceInfo
     FaceCoords<N> ccs;
     std::vector<std::size_t> point_indices;
 };
+
+inline bool
+normalize_barycentric(std::span<double, 3> bary, const double eps) noexcept
+{
+    bool changed = false;
+    for (double& val : bary) {
+        if (val < eps) [[unlikely]] {
+            val = 0.0;
+            changed = true;
+        }
+    }
+    if (!changed) {
+        return false;
+    }
+    const double sum = ranges::fold_left(bary, 0.0, std::plus{});
+    for (double& value : bary) {
+        value /= sum;
+    }
+    return true;
+}
 
 template<std::size_t N, typename Mesh>
 auto
@@ -1028,6 +1050,161 @@ TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double right_ori
     this->path_on_face_vec.emplace_back(he_ab.face().id);
 }
 
+struct EdgePoint
+{
+    gpf::EdgeId eid;
+    double t;
+    std::array<double, 3> pt;
+};
+
+template<typename Mesh>
+[[nodiscard]] std::array<double, 3>
+walk_on_mesh_surface_from_edge(const Mesh& mesh,
+                               std::span<double, 2> dir,
+                               const HalfedgeId cross_hid,
+                               std::vector<EdgePoint>& path_points,
+                               const double remaining_length,
+                               const double eps)
+{
+    std::array<double, 3> result{};
+    return result;
+}
+
+}
+
+template<typename VP, typename HP, typename EP, typename FP>
+[[nodiscard]] std::array<double, 3>
+walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
+                     const gpf::FaceId start_fid,
+                     std::span<double, 3> start_pt,
+                     std::span<const double, 3> direction,
+                     const double eps = 1e-6)
+{
+    using namespace detail;
+    using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
+    static_assert(gpf::mesh_position_dim_v<Mesh> == 3);
+    constexpr double BARY_EPS = 1e-3;
+
+    const auto face = mesh.face(start_fid);
+    const auto halfedges =
+      face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
+    const auto vertices =
+      halfedges | views::transform([&mesh](auto hid) { return mesh.he_from(hid); }) | ranges::to<std::vector>();
+    Eigen::Vector3d xaxis;
+    Eigen::Vector3d yaxis;
+    Eigen::Vector2d dir{};
+    std::array<double, 6> local_points{};
+    ranges::fill(local_points, 0.0);
+    Eigen::Vector2d start_proj{};
+    std::vector<double> start_bary{};
+    {
+        auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
+        auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[1]).pt.data());
+        auto pc = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[2]).pt.data());
+        xaxis = pb - pa;
+        auto lab = xaxis.norm();
+        xaxis /= lab;
+        auto vac = (pc - pa).eval();
+        auto lac = vac.norm();
+        vac /= lac;
+        const auto normal = xaxis.cross(vac).normalized().eval();
+        yaxis = normal.cross(xaxis);
+
+        const auto v = Eigen::Vector3d::Map(direction.data());
+        dir[0] = v.dot(xaxis);
+        dir[1] = v.dot(yaxis);
+        dir.normalize();
+
+        local_points[2] = lab;
+
+        auto lbc = (pc - pb).norm();
+        Eigen::Vector2d::Map(local_points.data() + 4) = triangle_apex_from_base_lengths(lab, lbc, lac, false);
+
+        auto start_vec = (Eigen::Vector3d::Map(start_pt.data()) - pa).eval();
+        start_proj[0] = start_vec.dot(xaxis);
+        start_proj[1] = start_vec.dot(yaxis);
+
+        std::vector<double> points;
+        points.reserve(8);
+        points.append_range(local_points);
+        points.append_range(start_proj);
+        start_bary = compute_bary_coordinates(points);
+    }
+
+    if (normalize_barycentric(std::span<double, 3>{ start_bary.data(), 3 }, BARY_EPS)) {
+        start_proj = start_bary[0] * Eigen::Vector2d::Map(&local_points[0]) +
+                     start_bary[1] * Eigen::Vector2d::Map(&local_points[2]) +
+                     start_bary[2] * Eigen::Vector2d::Map(&local_points[4]);
+    }
+
+    const double total_len = Eigen::Vector3d::Map(direction.data()).norm();
+    Eigen::Vector2d end_proj = start_proj + dir * total_len;
+    auto right_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[0]);
+    auto left_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[2]);
+    std::size_t idx{ 0 };
+    {
+        while (left_ori <= 0.0 && right_ori <= 0.0) {
+            idx = (idx + 4) % 6;
+            left_ori = right_ori;
+            right_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[idx]);
+        }
+
+        while (right_ori < 0.0 || left_ori > 0.0) {
+            idx = (idx + 2) % 6;
+            right_ori = left_ori;
+            left_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[(idx + 2) % 6]);
+        }
+    }
+    idx >>= 1;
+    assert(right_ori > 0.0);
+    assert(left_ori <= 0.0);
+
+    auto add_intersect_point = [&](double left_ori, double right_ori, gpf::HalfedgeId hab) {
+        using Vec = Eigen::Vector3d;
+        auto s = left_ori + right_ori;
+        auto tb = left_ori / s;
+        auto ta = 1.0 - tb;
+        EdgePoint edge_point;
+        auto he_ab = mesh.halfedge(hab);
+        auto pa = Vec::Map(he_ab.from().prop().pt.data());
+        auto pb = Vec::Map(he_ab.to().prop().pt.data());
+        Vec::Map(edge_point.pt.data()) = pa * tb + pb * ta;
+        auto e_ab = he_ab.edge();
+        if (e_ab.halfedge().id == he_ab.id) {
+            edge_point.t = ta;
+        } else {
+            edge_point.t = tb;
+        }
+        edge_point.eid = e_ab.id;
+        return edge_point;
+    };
+
+    auto cross_hid = halfedges[idx];
+    auto edge_point = add_intersect_point(-left_ori, right_ori, cross_hid);
+    auto from_pt = Eigen::Vector2d::Map(&local_points[idx << 1]);
+    auto to_pt = Eigen::Vector2d::Map(&local_points[((idx + 1) % 3) << 1]);
+    auto t = edge_point.t;
+    if (cross_hid != mesh.e_halfedge(edge_point.eid)) {
+        t = 1.0 - t;
+    }
+    Eigen::Vector2d edge_point_proj = from_pt * (1.0 - t) + to_pt * t;
+    const auto curr_len = (edge_point_proj - start_proj).norm();
+    if (total_len < curr_len - eps) {
+        std::array<double, 3> result{};
+        auto uv = start_proj + dir * total_len;
+        Eigen::Vector3d::Map(result.data()) =
+          uv[0] * xaxis + uv[1] * yaxis + Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
+        return result;
+    } else if (total_len < curr_len + eps) {
+        return edge_point.pt;
+    } else {
+        Eigen::Vector2d base = (from_pt - to_pt).normalized();
+        auto cos_theta = base.dot(dir);
+        std::array<double, 2> next_dir = { cos_theta, std::sqrt(1.0 - cos_theta * cos_theta) };
+        std::vector<EdgePoint> path_points{ edge_point };
+        return walk_on_mesh_surface_from_edge(
+          mesh, next_dir, mesh.he_twin(cross_hid), path_points, total_len - curr_len, eps);
+    }
 }
 
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>

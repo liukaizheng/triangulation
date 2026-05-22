@@ -20,6 +20,8 @@ test_property_edge_length_updates();
 void
 test_project_polylines_on_mesh_2d_points();
 void
+test_walk_on_mesh_surface();
+void
 test_mesh_edge_collapse1();
 void
 test_orthtree_quadtree();
@@ -32,6 +34,7 @@ int
 main()
 {
     test_project_polylines_on_mesh_2d_points();
+    test_walk_on_mesh_surface();
     test_mesh_edge_collapse1();
     test_triangulate_bug2();
     test_triangulate_bug1();
