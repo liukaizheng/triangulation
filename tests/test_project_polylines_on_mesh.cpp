@@ -133,10 +133,18 @@ test_walk_on_mesh_surface()
     {
         auto mesh = make_single_triangle();
         const gpf::FaceId fid{ 0 };
-        std::array<double, 3> start_pt{ 0.0, 0.5, 0.0 };
+        const std::array<double, 3> start_pt{ 0.0, 0.5, 0.0 };
         const std::array<double, 3> direction{ 0.0, 1.0, 0.0 };
+        const std::array<double, 4> lengths{ 0.0, 0.1, 0.25, 0.4 };
 
-        const auto result = gpf::walk_on_mesh_surface(mesh, fid, start_pt, direction);
+        const auto result =
+          gpf::walk_on_mesh_surface(mesh, fid, start_pt, direction, std::span<const double>{ lengths });
+        assert(result.has_value());
+        assert(result->size() == lengths.size());
+        const auto& pts = *result;
+        assert(std::abs(pts[0][0] - start_pt[0]) < 1e-12);
+        assert(std::abs(pts[0][1] - start_pt[1]) < 1e-12);
+        assert(std::abs(pts[0][2] - start_pt[2]) < 1e-12);
     }
     {
         std::vector<double> points{ 0.0, 0.0, 1.0, 0.0, 0.0, 1.0 };
@@ -169,13 +177,19 @@ test_walk_on_mesh_surface()
 
         write_obj("123.obj", mesh);
 
-        Eigen::Vector3d start_pt(0.75, 0.0005, 0.0);
-        Eigen::Vector3d end_pt(0.1, 0.8, 0.0);
-        Eigen::Vector3d direction = end_pt - start_pt;
+        const Eigen::Vector3d start_pt(0.75, 0.0005, 0.0);
+        const Eigen::Vector3d end_pt(0.1, 0.8, 0.0);
+        const Eigen::Vector3d diff = end_pt - start_pt;
+        const double total = diff.norm();
+        const Eigen::Vector3d direction = diff / total;
+        const std::array<double, 5> lengths{ 0.0, total * 0.25, total * 0.5, total * 0.75, total };
 
         auto ret = gpf::walk_on_mesh_surface(mesh,
                                              gpf::FaceId{ 1325 },
-                                             std::span<double, 3>{ start_pt.data(), 3 },
-                                             std::span<const double, 3>{ direction.data(), 3 });
+                                             std::span<const double, 3>{ start_pt.data(), 3 },
+                                             std::span<const double, 3>{ direction.data(), 3 },
+                                             std::span<const double>{ lengths });
+        assert(ret.has_value());
+        assert(ret->size() == lengths.size());
     }
 }

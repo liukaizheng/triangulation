@@ -38,6 +38,7 @@ namespace gpf {
 enum class WalkOnMeshSurfaceErrorCode
 {
     BoundaryReached,
+    IterationLimitExceeded,
     DegenerateDirection,
     InvalidPath,
     DegenerateStep
@@ -52,7 +53,7 @@ struct WalkOnMeshSurfaceError
     gpf::FaceId fid{};
 };
 
-using WalkOnMeshSurfaceResult = std::expected<std::array<double, 3>, WalkOnMeshSurfaceError>;
+using WalkOnMeshSurfaceResult = std::expected<std::vector<std::array<double, 3>>, WalkOnMeshSurfaceError>;
 
 namespace detail {
 namespace views = std::views;
@@ -1120,93 +1121,101 @@ local_edge_point(const double left_ori, const double right_ori, const Vector2d& 
 }
 
 template<typename Mesh>
-[[nodiscard]] WalkOnMeshSurfaceResult
+[[nodiscard]] std::expected<void, WalkOnMeshSurfaceError>
 walk_on_mesh_surface_from_edge(const Mesh& mesh,
-                               std::span<const double, 2> dir,
                                HalfedgeId cross_hid,
-                               std::vector<EdgePoint>& path_points,
-                               double length_left,
+                               Vector2d curr_dir,
+                               EdgePoint entry,
+                               double traveled,
+                               std::span<const double> lengths,
+                               std::size_t& sample_idx,
+                               std::vector<std::array<double, 3>>& result,
                                const double eps)
 {
-    Eigen::Vector2d curr_dir = Eigen::Vector2d::Map(dir.data());
-
-    while (true) {
-        if (length_left <= eps) {
-            return path_points.back().pt;
+    const std::size_t max_iters = mesh.n_faces() + lengths.size() + 8;
+    for (std::size_t iter = 0; iter < max_iters; ++iter) {
+        if (sample_idx == lengths.size()) {
+            return {};
         }
 
-        const auto curr_eid = mesh.he_edge(cross_hid);
-        const auto curr_fid = mesh.he_face(cross_hid);
-
-        if (!curr_fid.valid()) {
-            return make_walk_on_mesh_surface_error(
-              WalkOnMeshSurfaceErrorCode::BoundaryReached, path_points.back().pt, cross_hid, curr_eid, curr_fid);
+        const auto fid = mesh.he_face(cross_hid);
+        if (!fid.valid()) {
+            return std::unexpected(WalkOnMeshSurfaceError{ .code = WalkOnMeshSurfaceErrorCode::BoundaryReached,
+                                                           .point = entry.pt,
+                                                           .hid = cross_hid,
+                                                           .eid = mesh.he_edge(cross_hid),
+                                                           .fid = fid });
         }
 
-        auto he_ab = mesh.halfedge(cross_hid);
-        auto he_bc = he_ab.next();
-        auto he_ca = he_bc.next();
+        const auto he_ab = mesh.halfedge(cross_hid);
+        const auto he_bc = he_ab.next();
+        const auto he_ca = he_bc.next();
         assert(he_ca.next().id == he_ab.id);
 
-        const auto va = Vector3d::Map(he_ab.from().prop().pt.data());
-        const auto vb = Vector3d::Map(he_ab.to().prop().pt.data());
-        const auto vc = Vector3d::Map(he_bc.to().prop().pt.data());
-        const auto lab = (vb - va).norm();
-        const auto lbc = (vc - vb).norm();
-        const auto lca = (va - vc).norm();
+        const Vector3d va3 = Vector3d::Map(he_ab.from().prop().pt.data());
+        const Vector3d vb3 = Vector3d::Map(he_ab.to().prop().pt.data());
+        const Vector3d vc3 = Vector3d::Map(he_bc.to().prop().pt.data());
+        const double lab = (vb3 - va3).norm();
+        const double lbc = (vc3 - vb3).norm();
+        const double lca = (va3 - vc3).norm();
+        const Vector2d pa2{ 0.0, 0.0 };
+        const Vector2d pb2{ lab, 0.0 };
+        const Vector2d pc2 = triangle_apex_from_base_lengths(lab, lbc, lca, false);
 
-        Vector2d pa{ 0.0, 0.0 };
-        Vector2d pb{ lab, 0.0 };
-        Vector2d pc = triangle_apex_from_base_lengths(lab, lbc, lca, false);
-
-        double t = path_points.back().t;
+        double t_in = entry.t;
         if (he_ab.edge().halfedge().id != he_ab.id) {
-            t = 1.0 - t;
+            t_in = 1.0 - t_in;
         }
-        Vector2d mid_pt{ pa * (1.0 - t) + pb * t };
-        Vector2d pd = mid_pt + curr_dir * length_left;
+        const Vector2d mid_pt = pa2 * (1.0 - t_in) + pb2 * t_in;
+        const double ray_scale = std::max(lengths.back() - traveled, 1.0);
+        const Vector2d pd = mid_pt + curr_dir * ray_scale;
+        const double vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc2.data());
 
-        const auto vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc.data());
-        EdgePoint edge_point;
-        Vector2d edge_point_proj{};
-        HalfedgeId next_hid{};
-        Vector2d next_dir{};
+        EdgePoint exit;
+        Vector2d exit_2d;
+        Vector2d base_2d;
+        HalfedgeId exit_hid;
         if (vc_ori > 0.0) {
-            const auto right_ori = std::max(predicates::orient2d(mid_pt.data(), pb.data(), pd.data()), 0.0);
-            edge_point = make_walk_edge_point(mesh, vc_ori, right_ori, he_bc.id);
-            edge_point_proj = local_edge_point(vc_ori, right_ori, pb, pc);
-            next_hid = he_bc.twin().id;
-            next_dir = complex_div(curr_dir, pb - pc).normalized();
+            const double right = std::max(predicates::orient2d(mid_pt.data(), pb2.data(), pd.data()), 0.0);
+            exit = make_walk_edge_point(mesh, vc_ori, right, he_bc.id);
+            exit_2d = local_edge_point(vc_ori, right, pb2, pc2);
+            base_2d = pb2 - pc2;
+            exit_hid = he_bc.id;
         } else {
-            const auto right_ori = std::max(0.0, -vc_ori);
-            const auto left_ori = std::max(0.0, predicates::orient2d(mid_pt.data(), pd.data(), pa.data()));
-            edge_point = make_walk_edge_point(mesh, left_ori, right_ori, he_ca.id);
-            edge_point_proj = local_edge_point(left_ori, right_ori, pc, pa);
-            next_hid = he_ca.twin().id;
-            next_dir = complex_div(curr_dir, pc - pa).normalized();
-        }
-        const auto curr_len = (edge_point_proj - mid_pt).norm();
-        if (length_left < curr_len - eps) {
-            std::vector<double> bary_input{};
-            bary_input.reserve(6);
-            bary_input.append_range(pa);
-            bary_input.append_range(pb);
-            bary_input.append_range(pc);
-            bary_input.append_range(pd);
-            auto bary_coords = compute_bary_coordinates(bary_input);
-            normalize_barycentric(std::span<double, 3>{ bary_coords.data(), 3 }, BARY_EPS);
-            std::array<double, 3> result{};
-            Eigen::Vector3d::Map(result.data()) = bary_coords[0] * va + bary_coords[1] * vb + bary_coords[2] * vc;
-            return result;
-        } else if (length_left < curr_len + eps) {
-            return edge_point.pt;
+            const double right = std::max(-vc_ori, 0.0);
+            const double left = std::max(predicates::orient2d(mid_pt.data(), pd.data(), pa2.data()), 0.0);
+            exit = make_walk_edge_point(mesh, left, right, he_ca.id);
+            exit_2d = local_edge_point(left, right, pc2, pa2);
+            base_2d = pc2 - pa2;
+            exit_hid = he_ca.id;
         }
 
-        path_points.push_back(std::move(edge_point));
-        length_left -= curr_len;
-        curr_dir = next_dir;
-        cross_hid = next_hid;
+        const double seg_len = (exit_2d - mid_pt).norm();
+        const auto entry_pt = Vector3d::Map(entry.pt.data());
+        const auto exit_pt = Vector3d::Map(exit.pt.data());
+        while (sample_idx < lengths.size() && lengths[sample_idx] <= traveled + seg_len + eps) {
+            const double s = lengths[sample_idx] - traveled;
+            const double t = (seg_len > 0.0) ? (s / seg_len) : 0.0;
+            std::array<double, 3> pt{};
+            Vector3d::Map(pt.data()) = entry_pt + (exit_pt - entry_pt) * t;
+            result.push_back(std::move(pt));
+            ++sample_idx;
+        }
+        if (sample_idx == lengths.size()) {
+            return {};
+        }
+
+        traveled += seg_len;
+        cross_hid = mesh.he_twin(exit_hid);
+        entry = std::move(exit);
+        curr_dir = complex_div(curr_dir, base_2d).normalized();
     }
+
+    return std::unexpected(WalkOnMeshSurfaceError{ .code = WalkOnMeshSurfaceErrorCode::IterationLimitExceeded,
+                                                   .point = entry.pt,
+                                                   .hid = cross_hid,
+                                                   .eid = mesh.he_edge(cross_hid),
+                                                   .fid = mesh.he_face(cross_hid) });
 }
 
 }
@@ -1215,118 +1224,126 @@ template<typename VP, typename HP, typename EP, typename FP>
 [[nodiscard]] WalkOnMeshSurfaceResult
 walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
                      const gpf::FaceId start_fid,
-                     std::span<double, 3> start_pt,
+                     std::span<const double, 3> start_pt,
                      std::span<const double, 3> direction,
+                     std::span<const double> lengths,
                      const double eps = 1e-6)
 {
     using namespace detail;
     using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
     static_assert(gpf::mesh_position_dim_v<Mesh> == 3);
 
+    std::vector<std::array<double, 3>> result;
+    result.reserve(lengths.size());
+    if (lengths.empty()) {
+        return result;
+    }
+
+    assert(std::abs(Eigen::Vector3d::Map(direction.data()).norm() - 1.0) < 1e-6);
+
     const auto face = mesh.face(start_fid);
     const auto halfedges =
       face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
     const auto vertices =
       halfedges | views::transform([&mesh](auto hid) { return mesh.he_from(hid); }) | ranges::to<std::vector>();
-    Eigen::Vector3d xaxis;
-    Eigen::Vector3d yaxis;
+
     Eigen::Vector2d dir{};
     std::array<double, 6> local_points{};
     ranges::fill(local_points, 0.0);
     Eigen::Vector2d start_proj{};
-    std::vector<double> start_bary{};
+    Eigen::Vector3d start_pt_3d{};
+    const Eigen::Vector3d tri_a3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
+    const Eigen::Vector3d tri_b3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[1]).pt.data());
+    const Eigen::Vector3d tri_c3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[2]).pt.data());
     {
-        auto pa = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
-        auto pb = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[1]).pt.data());
-        auto pc = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[2]).pt.data());
-        xaxis = pb - pa;
-        auto lab = xaxis.norm();
+        Eigen::Vector3d xaxis = tri_b3 - tri_a3;
+        const auto lab = xaxis.norm();
         xaxis /= lab;
-        auto vac = (pc - pa).eval();
-        auto lac = vac.norm();
+        auto vac = (tri_c3 - tri_a3).eval();
+        const auto lac = vac.norm();
         vac /= lac;
         const auto normal = xaxis.cross(vac).normalized().eval();
-        yaxis = normal.cross(xaxis);
+        const Eigen::Vector3d yaxis = normal.cross(xaxis);
 
         const auto v = Eigen::Vector3d::Map(direction.data());
         dir[0] = v.dot(xaxis);
         dir[1] = v.dot(yaxis);
-        const auto dir_norm = dir.norm();
-        dir /= dir_norm;
 
         local_points[2] = lab;
-
-        auto lbc = (pc - pb).norm();
+        const auto lbc = (tri_c3 - tri_b3).norm();
         Eigen::Vector2d::Map(local_points.data() + 4) = triangle_apex_from_base_lengths(lab, lbc, lac, false);
 
-        auto start_vec = (Eigen::Vector3d::Map(start_pt.data()) - pa).eval();
+        auto start_vec = (Eigen::Vector3d::Map(start_pt.data()) - tri_a3).eval();
         start_proj[0] = start_vec.dot(xaxis);
         start_proj[1] = start_vec.dot(yaxis);
 
-        std::vector<double> points;
-        points.reserve(8);
-        points.append_range(local_points);
-        points.append_range(start_proj);
-        start_bary = compute_bary_coordinates(points);
+        std::vector<double> bary_points;
+        bary_points.reserve(8);
+        bary_points.append_range(local_points);
+        bary_points.append_range(start_proj);
+        auto start_bary = compute_bary_coordinates(bary_points);
+        if (normalize_barycentric(std::span<double, 3>{ start_bary.data(), 3 }, BARY_EPS)) {
+            start_proj = start_bary[0] * Eigen::Vector2d::Map(&local_points[0]) +
+                         start_bary[1] * Eigen::Vector2d::Map(&local_points[2]) +
+                         start_bary[2] * Eigen::Vector2d::Map(&local_points[4]);
+        }
+        start_pt_3d = start_bary[0] * tri_a3 + start_bary[1] * tri_b3 + start_bary[2] * tri_c3;
     }
 
-    if (normalize_barycentric(std::span<double, 3>{ start_bary.data(), 3 }, BARY_EPS)) {
-        start_proj = start_bary[0] * Eigen::Vector2d::Map(&local_points[0]) +
-                     start_bary[1] * Eigen::Vector2d::Map(&local_points[2]) +
-                     start_bary[2] * Eigen::Vector2d::Map(&local_points[4]);
-    }
-
-    const double total_len = Eigen::Vector3d::Map(direction.data()).norm();
-    Eigen::Vector2d end_proj = start_proj + dir * total_len;
-    auto right_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[0]);
-    auto left_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[2]);
+    const Eigen::Vector2d ray_ref = start_proj + dir;
+    auto right_ori = predicates::orient2d(ray_ref.data(), start_proj.data(), &local_points[0]);
+    auto left_ori = predicates::orient2d(ray_ref.data(), start_proj.data(), &local_points[2]);
     std::size_t idx{ 0 };
     {
         while (left_ori <= 0.0 && right_ori <= 0.0) {
             idx = (idx + 4) % 6;
             left_ori = right_ori;
-            right_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[idx]);
+            right_ori = predicates::orient2d(ray_ref.data(), start_proj.data(), &local_points[idx]);
         }
 
         while (right_ori < 0.0 || left_ori > 0.0) {
             idx = (idx + 2) % 6;
             right_ori = left_ori;
-            left_ori = predicates::orient2d(end_proj.data(), start_proj.data(), &local_points[(idx + 2) % 6]);
+            left_ori = predicates::orient2d(ray_ref.data(), start_proj.data(), &local_points[(idx + 2) % 6]);
         }
     }
     idx >>= 1;
     assert(right_ori > 0.0);
     assert(left_ori <= 0.0);
 
-    auto cross_hid = halfedges[idx];
-    auto edge_point = make_walk_edge_point(mesh, -left_ori, right_ori, cross_hid);
-    auto from_pt = Eigen::Vector2d::Map(&local_points[idx << 1]);
-    auto to_pt = Eigen::Vector2d::Map(&local_points[((idx + 1) % 3) << 1]);
-    auto t = edge_point.t;
-    if (cross_hid != mesh.e_halfedge(edge_point.eid)) {
-        t = 1.0 - t;
+    const auto cross_hid_start = halfedges[idx];
+    const Eigen::Vector2d from_pt = Eigen::Vector2d::Map(&local_points[idx << 1]);
+    const Eigen::Vector2d to_pt = Eigen::Vector2d::Map(&local_points[((idx + 1) % 3) << 1]);
+
+    const auto start_edge_point = make_walk_edge_point(mesh, -left_ori, right_ori, cross_hid_start);
+    double t_along_exit = start_edge_point.t;
+    if (mesh.e_halfedge(start_edge_point.eid) != cross_hid_start) {
+        t_along_exit = 1.0 - t_along_exit;
     }
-    Eigen::Vector2d edge_point_proj = from_pt * (1.0 - t) + to_pt * t;
-    const auto curr_len = (edge_point_proj - start_proj).norm();
-    if (total_len < curr_len - eps) {
-        std::array<double, 3> result{};
-        auto uv = start_proj + dir * total_len;
-        Eigen::Vector3d::Map(result.data()) =
-          uv[0] * xaxis + uv[1] * yaxis + Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
+    const Eigen::Vector2d exit_2d_start = from_pt * (1.0 - t_along_exit) + to_pt * t_along_exit;
+    const double seg_len_start = (exit_2d_start - start_proj).norm();
+
+    std::size_t sample_idx = 0;
+    const auto exit_3d_start = Eigen::Vector3d::Map(start_edge_point.pt.data());
+    while (sample_idx < lengths.size() && lengths[sample_idx] <= seg_len_start + eps) {
+        const double s = lengths[sample_idx];
+        const double t = (seg_len_start > 0.0) ? (s / seg_len_start) : 0.0;
+        std::array<double, 3> pt{};
+        Eigen::Vector3d::Map(pt.data()) = start_pt_3d + (exit_3d_start - start_pt_3d) * t;
+        result.push_back(std::move(pt));
+        ++sample_idx;
+    }
+    if (sample_idx == lengths.size()) {
         return result;
-    } else if (total_len < curr_len + eps) {
-        return edge_point.pt;
-    } else {
-        Eigen::Vector2d base = (from_pt - to_pt).normalized();
-        auto next_dir = complex_div(dir, base);
-        std::vector<EdgePoint> path_points{ edge_point };
-        return walk_on_mesh_surface_from_edge(mesh,
-                                              std::span<double, 2>{ next_dir.data(), 2 },
-                                              mesh.he_twin(cross_hid),
-                                              path_points,
-                                              total_len - curr_len,
-                                              eps);
     }
+
+    const Eigen::Vector2d next_dir = complex_div(dir, from_pt - to_pt).normalized();
+    auto inner = walk_on_mesh_surface_from_edge(
+      mesh, mesh.he_twin(cross_hid_start), next_dir, start_edge_point, seg_len_start, lengths, sample_idx, result, eps);
+    if (!inner) {
+        return std::unexpected(inner.error());
+    }
+    return result;
 }
 
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
