@@ -1,9 +1,12 @@
+#include <gpf/ids.hpp>
 #include <gpf/manifold_mesh.hpp>
 #include <gpf/project_polylines_on_mesh.hpp>
+#include <gpf/triangulation.hpp>
 
 #include <cassert>
 #include <print>
 #include <random>
+#include <ranges>
 
 namespace {
 struct VertexProp
@@ -119,10 +122,11 @@ void
 test_walk_on_mesh_surface()
 {
     auto make_single_triangle = [] {
-        Mesh3d mesh = Mesh3d::new_in(std::vector<std::vector<std::size_t>>{ { 0, 1, 2 } });
+        Mesh3d mesh = Mesh3d::new_in(std::vector<std::vector<std::size_t>>{ { 0, 1, 2 }, { 2, 1, 3 }, { 0, 2, 3 } });
         mesh.vertex_prop(gpf::VertexId{ 0 }).pt = { -1.0, 0.0, 0.0 };
         mesh.vertex_prop(gpf::VertexId{ 1 }).pt = { 1.0, 0.0, 0.0 };
         mesh.vertex_prop(gpf::VertexId{ 2 }).pt = { 0.0, 1.0, 0.0 };
+        mesh.vertex_prop(gpf::VertexId{ 3 }).pt = { 1e-6, 2.0, 0.0 };
         return mesh;
     };
 
@@ -133,5 +137,45 @@ test_walk_on_mesh_surface()
         const std::array<double, 3> direction{ 0.0, 1.0, 0.0 };
 
         const auto result = gpf::walk_on_mesh_surface(mesh, fid, start_pt, direction);
+    }
+    {
+        std::vector<double> points{ 0.0, 0.0, 1.0, 0.0, 0.0, 1.0 };
+        const std::size_t N = 1000;
+
+        std::mt19937 rng(42); // Seed for reproducibility
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+        for (int i = 0; i < N; ++i) {
+            const auto a = dist(rng);
+            const auto b = dist(rng);
+            const auto c = dist(rng);
+            const auto sum = a + b + c;
+            const auto t1 = a / sum;
+            const auto t2 = b / sum;
+
+            points.append_range(std::array<double, 2>{ t1, t2 });
+        }
+        auto triangles = gpf::triangulate_points(points, true);
+        assert(triangles.size() % 3 == 0);
+        std::vector<std::array<std::size_t, 3>> triangle_faces;
+        triangle_faces.reserve(triangles.size() / 3);
+        for (std::size_t i = 0; i < triangles.size(); i += 3) {
+            triangle_faces.push_back({ triangles[i], triangles[i + 1], triangles[i + 2] });
+        }
+        Mesh3d mesh = Mesh3d::new_in(triangle_faces);
+        for (auto [v, i] : std::views::zip(mesh.vertices(), std::views::iota(std::size_t{ 0 }, mesh.n_vertices()))) {
+            v.prop().pt = std::array{ points[2 * i], points[2 * i + 1], 0.0 };
+        }
+
+        write_obj("123.obj", mesh);
+
+        Eigen::Vector3d start_pt(0.75, 0.0005, 0.0);
+        Eigen::Vector3d end_pt(0.1, 0.8, 0.0);
+        Eigen::Vector3d direction = end_pt - start_pt;
+
+        auto ret = gpf::walk_on_mesh_surface(mesh,
+                                             gpf::FaceId{ 1325 },
+                                             std::span<double, 3>{ start_pt.data(), 3 },
+                                             std::span<const double, 3>{ direction.data(), 3 });
     }
 }
