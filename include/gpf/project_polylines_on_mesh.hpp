@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <expected>
 #include <functional>
-#include <gpf/ids.hpp>
 #include <limits>
+#include <numbers>
 #include <numeric>
 #include <queue>
 #include <ranges>
@@ -18,21 +18,22 @@
 #include <variant>
 #include <vector>
 
-#include <Eigen/Dense>
-#include <Eigen/Geometry>
-
-#include <predicates/predicates.hpp>
-
-#include <gpf/mesh.hpp>
-#include <gpf/mesh_property.hpp>
-#include <gpf/triangulation.hpp>
-
 #include <CGAL/AABB_traits_2.h>
 #include <CGAL/AABB_traits_3.h>
 #include <CGAL/AABB_tree.h>
 #include <CGAL/AABB_triangle_primitive_2.h>
 #include <CGAL/AABB_triangle_primitive_3.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+
+#include <predicates/predicates.hpp>
+
+#include <gpf/ids.hpp>
+#include <gpf/mesh.hpp>
+#include <gpf/mesh_property.hpp>
+#include <gpf/triangulation.hpp>
 
 namespace gpf {
 enum class WalkOnMeshSurfaceErrorCode
