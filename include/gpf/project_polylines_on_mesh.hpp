@@ -36,7 +36,7 @@
 #include <gpf/triangulation.hpp>
 
 namespace gpf {
-enum class WalkOnMeshSurfaceErrorCode
+enum class WalkOnMeshSurfaceFailure
 {
     BoundaryReached,
     IterationLimitExceeded,
@@ -45,16 +45,7 @@ enum class WalkOnMeshSurfaceErrorCode
     DegenerateStep
 };
 
-struct WalkOnMeshSurfaceError
-{
-    WalkOnMeshSurfaceErrorCode code{};
-    std::array<double, 3> point{};
-    gpf::HalfedgeId hid{};
-    gpf::EdgeId eid{};
-    gpf::FaceId fid{};
-};
-
-using WalkOnMeshSurfaceResult = std::expected<std::vector<std::array<double, 3>>, WalkOnMeshSurfaceError>;
+using WalkOnMeshSurfaceResult = std::expected<std::vector<std::array<double, 3>>, WalkOnMeshSurfaceFailure>;
 
 namespace detail {
 namespace views = std::views;
@@ -865,16 +856,39 @@ FlipGeodesic::replace_path(std::vector<gpf::HalfedgeId>&& new_path,
     }
 }
 
+template<std::size_t N>
+struct EdgePoint
+{
+    gpf::EdgeId eid;
+    double t;
+    std::array<double, N> pt;
+};
+
+template<std::size_t N, typename Mesh>
+[[nodiscard]] EdgePoint<N>
+make_edge_point(const Mesh& mesh, const double left_ori, const double right_ori, const gpf::HalfedgeId hab)
+{
+    const auto s = left_ori + right_ori;
+    const auto tb = left_ori / s;
+    const auto ta = 1.0 - tb;
+    EdgePoint<N> edge_point;
+    auto he_ab = mesh.halfedge(hab);
+    auto pa = VectorNd<N>::Map(he_ab.from().prop().pt.data());
+    auto pb = VectorNd<N>::Map(he_ab.to().prop().pt.data());
+    VectorNd<N>::Map(edge_point.pt.data()) = pa * tb + pb * ta;
+    auto e_ab = he_ab.edge();
+    if (e_ab.halfedge().id == he_ab.id) {
+        edge_point.t = ta;
+    } else {
+        edge_point.t = tb;
+    }
+    edge_point.eid = e_ab.id;
+    return edge_point;
+}
+
 template<std::size_t N, typename Mesh>
 struct TracePolyline
 {
-    struct EdgePoint
-    {
-        gpf::EdgeId eid;
-        double t;
-        std::array<double, N> pt;
-    };
-
     using Anchor = std::variant<gpf::VertexId, std::size_t>;
 
     void trace_from_vertex(gpf::HalfedgeId start_hid);
@@ -882,7 +896,7 @@ struct TracePolyline
     void add_intersection_point(double left_ori, double right_ori, gpf::HalfedgeId hab);
     std::span<const double> origin_signpost_angles;
     std::span<const double> origin_edge_lengths;
-    std::vector<EdgePoint>& edge_points;
+    std::vector<EdgePoint<N>>& edge_points;
     Mesh* mesh;
     AuxiliaryMesh* aux_mesh;
     std::vector<Anchor> path;
@@ -1051,65 +1065,12 @@ template<std::size_t N, typename Mesh>
 void
 TracePolyline<N, Mesh>::add_intersection_point(double left_ori, double right_ori, gpf::HalfedgeId hab)
 {
-    using Vec = Eigen::Matrix<double, N, 1>;
-    auto s = left_ori + right_ori;
-    auto tb = left_ori / s;
-    auto ta = 1.0 - tb;
-    EdgePoint edge_point;
     auto he_ab = mesh->halfedge(hab);
-    auto pa = Vec::Map(he_ab.from().prop().pt.data());
-    auto pb = Vec::Map(he_ab.to().prop().pt.data());
-    Vec::Map(edge_point.pt.data()) = pa * tb + pb * ta;
-    auto e_ab = he_ab.edge();
-    if (e_ab.halfedge().id == he_ab.id) {
-        edge_point.t = ta;
-    } else {
-        edge_point.t = tb;
-    }
-    edge_point.eid = e_ab.id;
+    auto edge_point = make_edge_point<N>(*mesh, left_ori, right_ori, hab);
     auto pid = this->edge_points.size();
     this->edge_points.push_back(std::move(edge_point));
     this->path.emplace_back(pid);
     this->path_on_face_vec.emplace_back(he_ab.face().id);
-}
-
-struct EdgePoint
-{
-    gpf::EdgeId eid;
-    double t;
-    std::array<double, 3> pt;
-};
-
-[[nodiscard]] inline WalkOnMeshSurfaceResult
-make_walk_on_mesh_surface_error(const WalkOnMeshSurfaceErrorCode code,
-                                const std::array<double, 3>& point,
-                                const gpf::HalfedgeId hid = {},
-                                const gpf::EdgeId eid = {},
-                                const gpf::FaceId fid = {})
-{
-    return std::unexpected(WalkOnMeshSurfaceError{ .code = code, .point = point, .hid = hid, .eid = eid, .fid = fid });
-}
-
-template<typename Mesh>
-[[nodiscard]] EdgePoint
-make_walk_edge_point(const Mesh& mesh, const double left_ori, const double right_ori, const gpf::HalfedgeId hab)
-{
-    const auto s = left_ori + right_ori;
-    const auto tb = left_ori / s;
-    const auto ta = 1.0 - tb;
-    EdgePoint edge_point;
-    auto he_ab = mesh.halfedge(hab);
-    auto pa = Vector3d::Map(he_ab.from().prop().pt.data());
-    auto pb = Vector3d::Map(he_ab.to().prop().pt.data());
-    Vector3d::Map(edge_point.pt.data()) = pa * tb + pb * ta;
-    auto e_ab = he_ab.edge();
-    if (e_ab.halfedge().id == he_ab.id) {
-        edge_point.t = ta;
-    } else {
-        edge_point.t = tb;
-    }
-    edge_point.eid = e_ab.id;
-    return edge_point;
 }
 
 [[nodiscard]] inline Vector2d
@@ -1122,16 +1083,36 @@ local_edge_point(const double left_ori, const double right_ori, const Vector2d& 
 }
 
 template<typename Mesh>
-[[nodiscard]] std::expected<void, WalkOnMeshSurfaceError>
-walk_on_mesh_surface_from_edge(const Mesh& mesh,
-                               HalfedgeId cross_hid,
-                               Vector2d curr_dir,
-                               EdgePoint entry,
-                               double traveled,
-                               std::span<const double> lengths,
-                               std::size_t& sample_idx,
-                               std::vector<std::array<double, 3>>& result,
-                               const double eps)
+struct WalkOnMeshSurface
+{
+    std::size_t sample_idx = 0;
+    std::span<const double> lengths;
+
+    [[nodiscard]] WalkOnMeshSurfaceResult operator()(const Mesh& mesh,
+                                                     gpf::FaceId start_fid,
+                                                     std::span<const double, 3> start_pt,
+                                                     std::span<const double, 3> direction,
+                                                     double eps);
+
+    [[nodiscard]] std::expected<void, WalkOnMeshSurfaceFailure> walk_from_edge(
+      const Mesh& mesh,
+      HalfedgeId cross_hid,
+      Vector2d curr_dir,
+      EdgePoint<3> entry,
+      double traveled,
+      std::vector<std::array<double, 3>>& result,
+      double eps);
+};
+
+template<typename Mesh>
+[[nodiscard]] std::expected<void, WalkOnMeshSurfaceFailure>
+WalkOnMeshSurface<Mesh>::walk_from_edge(const Mesh& mesh,
+                                        HalfedgeId cross_hid,
+                                        Vector2d curr_dir,
+                                        EdgePoint<3> entry,
+                                        double traveled,
+                                        std::vector<std::array<double, 3>>& result,
+                                        const double eps)
 {
     const std::size_t max_iters = mesh.n_faces() + lengths.size() + 8;
     for (std::size_t iter = 0; iter < max_iters; ++iter) {
@@ -1141,11 +1122,7 @@ walk_on_mesh_surface_from_edge(const Mesh& mesh,
 
         const auto fid = mesh.he_face(cross_hid);
         if (!fid.valid()) {
-            return std::unexpected(WalkOnMeshSurfaceError{ .code = WalkOnMeshSurfaceErrorCode::BoundaryReached,
-                                                           .point = entry.pt,
-                                                           .hid = cross_hid,
-                                                           .eid = mesh.he_edge(cross_hid),
-                                                           .fid = fid });
+            return std::unexpected(WalkOnMeshSurfaceFailure::BoundaryReached);
         }
 
         const auto he_ab = mesh.halfedge(cross_hid);
@@ -1172,20 +1149,20 @@ walk_on_mesh_surface_from_edge(const Mesh& mesh,
         const Vector2d pd = mid_pt + curr_dir * ray_scale;
         const double vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc2.data());
 
-        EdgePoint exit;
+        EdgePoint<3> exit;
         Vector2d exit_2d;
         Vector2d base_2d;
         HalfedgeId exit_hid;
         if (vc_ori > 0.0) {
             const double right = std::max(predicates::orient2d(mid_pt.data(), pb2.data(), pd.data()), 0.0);
-            exit = make_walk_edge_point(mesh, vc_ori, right, he_bc.id);
+            exit = make_edge_point<3>(mesh, vc_ori, right, he_bc.id);
             exit_2d = local_edge_point(vc_ori, right, pb2, pc2);
             base_2d = pb2 - pc2;
             exit_hid = he_bc.id;
         } else {
             const double right = std::max(-vc_ori, 0.0);
             const double left = std::max(predicates::orient2d(mid_pt.data(), pd.data(), pa2.data()), 0.0);
-            exit = make_walk_edge_point(mesh, left, right, he_ca.id);
+            exit = make_edge_point<3>(mesh, left, right, he_ca.id);
             exit_2d = local_edge_point(left, right, pc2, pa2);
             base_2d = pc2 - pa2;
             exit_hid = he_ca.id;
@@ -1212,28 +1189,20 @@ walk_on_mesh_surface_from_edge(const Mesh& mesh,
         curr_dir = complex_div(curr_dir, base_2d).normalized();
     }
 
-    return std::unexpected(WalkOnMeshSurfaceError{ .code = WalkOnMeshSurfaceErrorCode::IterationLimitExceeded,
-                                                   .point = entry.pt,
-                                                   .hid = cross_hid,
-                                                   .eid = mesh.he_edge(cross_hid),
-                                                   .fid = mesh.he_face(cross_hid) });
+    return std::unexpected(WalkOnMeshSurfaceFailure::IterationLimitExceeded);
 }
 
-}
-
-template<typename VP, typename HP, typename EP, typename FP>
+template<typename Mesh>
 [[nodiscard]] WalkOnMeshSurfaceResult
-walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
-                     const gpf::FaceId start_fid,
-                     std::span<const double, 3> start_pt,
-                     std::span<const double, 3> direction,
-                     std::span<const double> lengths,
-                     const double eps = 1e-6)
+WalkOnMeshSurface<Mesh>::operator()(const Mesh& mesh,
+                                    const gpf::FaceId start_fid,
+                                    std::span<const double, 3> start_pt,
+                                    std::span<const double, 3> direction,
+                                    const double eps)
 {
-    using namespace detail;
-    using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
     static_assert(gpf::mesh_position_dim_v<Mesh> == 3);
 
+    sample_idx = 0;
     std::vector<std::array<double, 3>> result;
     result.reserve(lengths.size());
     if (lengths.empty()) {
@@ -1316,7 +1285,7 @@ walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
     const Eigen::Vector2d from_pt = Eigen::Vector2d::Map(&local_points[idx << 1]);
     const Eigen::Vector2d to_pt = Eigen::Vector2d::Map(&local_points[((idx + 1) % 3) << 1]);
 
-    const auto start_edge_point = make_walk_edge_point(mesh, -left_ori, right_ori, cross_hid_start);
+    const auto start_edge_point = make_edge_point<3>(mesh, -left_ori, right_ori, cross_hid_start);
     double t_along_exit = start_edge_point.t;
     if (mesh.e_halfedge(start_edge_point.eid) != cross_hid_start) {
         t_along_exit = 1.0 - t_along_exit;
@@ -1324,7 +1293,6 @@ walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
     const Eigen::Vector2d exit_2d_start = from_pt * (1.0 - t_along_exit) + to_pt * t_along_exit;
     const double seg_len_start = (exit_2d_start - start_proj).norm();
 
-    std::size_t sample_idx = 0;
     const auto exit_3d_start = Eigen::Vector3d::Map(start_edge_point.pt.data());
     while (sample_idx < lengths.size() && lengths[sample_idx] <= seg_len_start + eps) {
         const double s = lengths[sample_idx];
@@ -1339,12 +1307,28 @@ walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
     }
 
     const Eigen::Vector2d next_dir = complex_div(dir, from_pt - to_pt).normalized();
-    auto inner = walk_on_mesh_surface_from_edge(
-      mesh, mesh.he_twin(cross_hid_start), next_dir, start_edge_point, seg_len_start, lengths, sample_idx, result, eps);
+    auto inner =
+      walk_from_edge(mesh, mesh.he_twin(cross_hid_start), next_dir, start_edge_point, seg_len_start, result, eps);
     if (!inner) {
         return std::unexpected(inner.error());
     }
     return result;
+}
+
+} // namespace detail
+
+template<typename VP, typename HP, typename EP, typename FP>
+[[nodiscard]] WalkOnMeshSurfaceResult
+walk_on_mesh_surface(const ManifoldMesh<VP, HP, EP, FP>& mesh,
+                     const gpf::FaceId start_fid,
+                     std::span<const double, 3> start_pt,
+                     std::span<const double, 3> direction,
+                     std::span<const double> lengths,
+                     const double eps = 1e-6)
+{
+    using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
+    detail::WalkOnMeshSurface<Mesh> walk{ .sample_idx = 0, .lengths{ lengths } };
+    return walk(mesh, start_fid, start_pt, direction, eps);
 }
 
 template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
@@ -1381,7 +1365,7 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
     }
 
     detail::FlipGeodesic flip_geodesic{ .mesh = &aux_mesh };
-    std::vector<typename detail::TracePolyline<N, Mesh>::EdgePoint> edge_points;
+    std::vector<detail::EdgePoint<N>> edge_points;
     std::vector<std::vector<typename detail::TracePolyline<N, Mesh>::Anchor>> polyline_paths;
     std::vector<std::vector<gpf::FaceId>> path_segment_faces;
     polyline_paths.reserve(polylines.size());
