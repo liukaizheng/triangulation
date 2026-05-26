@@ -47,7 +47,9 @@ enum class WalkOnMeshSurfaceFailure
     DegenerateStep
 };
 
-using WalkOnMeshSurfaceResult = std::expected<std::vector<std::array<double, 3>>, WalkOnMeshSurfaceFailure>;
+// Result pair: face id, then barycentric coords ordered by mesh.face(fid).halfedges() from vertices.
+using WalkOnMeshSurfaceResult =
+  std::expected<std::vector<std::pair<gpf::FaceId, std::array<double, 3>>>, WalkOnMeshSurfaceFailure>;
 
 namespace detail {
 namespace views = std::views;
@@ -1084,6 +1086,16 @@ local_edge_point(const double left_ori, const double right_ori, const Vector2d& 
     return pa * tb + pb * ta;
 }
 
+[[nodiscard]] inline std::array<double, 3>
+interpolate_barycentric(const std::array<double, 3>& from, const std::array<double, 3>& to, const double t) noexcept
+{
+    std::array<double, 3> bary{};
+    for (std::size_t i = 0; i < bary.size(); ++i) {
+        bary[i] = from[i] + (to[i] - from[i]) * t;
+    }
+    return bary;
+}
+
 template<typename Mesh>
 struct WalkOnMeshSurface
 {
@@ -1102,7 +1114,7 @@ struct WalkOnMeshSurface
       Vector2d curr_dir,
       EdgePoint<3> entry,
       double traveled,
-      std::vector<std::array<double, 3>>& result,
+      std::vector<std::pair<gpf::FaceId, std::array<double, 3>>>& result,
       double eps);
 };
 
@@ -1113,7 +1125,7 @@ WalkOnMeshSurface<Mesh>::walk_from_edge(const Mesh& mesh,
                                         Vector2d curr_dir,
                                         EdgePoint<3> entry,
                                         double traveled,
-                                        std::vector<std::array<double, 3>>& result,
+                                        std::vector<std::pair<gpf::FaceId, std::array<double, 3>>>& result,
                                         const double eps)
 {
     const std::size_t max_iters = mesh.n_faces() + lengths.size() + 8;
@@ -1126,6 +1138,14 @@ WalkOnMeshSurface<Mesh>::walk_from_edge(const Mesh& mesh,
         if (!fid.valid()) {
             return std::unexpected(WalkOnMeshSurfaceFailure::BoundaryReached);
         }
+        const std::size_t cross_idx = [&] {
+            const auto indexed_halfedges =
+              views::zip(mesh.face(fid).halfedges(), ranges::iota_view{ std::size_t{ 0 }, std::size_t{ 3 } });
+            const auto cross_iter = ranges::find_if(
+              indexed_halfedges, [cross_hid](auto&& item) { return std::get<0>(item).id == cross_hid; });
+            assert(cross_iter != ranges::end(indexed_halfedges));
+            return std::get<1>(*cross_iter);
+        }();
 
         const auto he_ab = mesh.halfedge(cross_hid);
         const auto he_bc = he_ab.next();
@@ -1146,18 +1166,28 @@ WalkOnMeshSurface<Mesh>::walk_from_edge(const Mesh& mesh,
         if (he_ab.edge().halfedge().id != he_ab.id) {
             t_in = 1.0 - t_in;
         }
+        std::array<double, 3> entry_barycentric{ 0.0, 0.0, 0.0 };
+        entry_barycentric[cross_idx] = 1.0 - t_in;
+        entry_barycentric[(cross_idx + 1) % 3] = t_in;
         const Vector2d mid_pt = pa2 * (1.0 - t_in) + pb2 * t_in;
         const double ray_scale = std::max(lengths.back() - traveled, 1.0);
         const Vector2d pd = mid_pt + curr_dir * ray_scale;
         const double vc_ori = predicates::orient2d(mid_pt.data(), pd.data(), pc2.data());
 
         EdgePoint<3> exit;
+        std::array<double, 3> exit_barycentric{ 0.0, 0.0, 0.0 };
         Vector2d exit_2d;
         Vector2d base_2d;
         HalfedgeId exit_hid;
         if (vc_ori > 0.0) {
             const double right = std::max(predicates::orient2d(mid_pt.data(), pb2.data(), pd.data()), 0.0);
             exit = make_edge_point<3>(mesh, vc_ori, right, he_bc.id);
+            double t = exit.t;
+            if (mesh.e_halfedge(exit.eid) == he_bc.id) {
+                t = 1.0 - t;
+            }
+            exit_barycentric[(cross_idx + 1) % 3] = t;
+            exit_barycentric[(cross_idx + 2) % 3] = 1.0 - t;
             exit_2d = local_edge_point(vc_ori, right, pb2, pc2);
             base_2d = pb2 - pc2;
             exit_hid = he_bc.id;
@@ -1165,20 +1195,24 @@ WalkOnMeshSurface<Mesh>::walk_from_edge(const Mesh& mesh,
             const double right = std::max(-vc_ori, 0.0);
             const double left = std::max(predicates::orient2d(mid_pt.data(), pd.data(), pa2.data()), 0.0);
             exit = make_edge_point<3>(mesh, left, right, he_ca.id);
+            double t = exit.t;
+            if (mesh.e_halfedge(exit.eid) == he_ca.id) {
+                t = 1.0 - t;
+            }
+            exit_barycentric[(cross_idx + 2) % 3] = t;
+            exit_barycentric[cross_idx] = 1.0 - t;
             exit_2d = local_edge_point(left, right, pc2, pa2);
             base_2d = pc2 - pa2;
             exit_hid = he_ca.id;
         }
 
         const double seg_len = (exit_2d - mid_pt).norm();
-        const auto entry_pt = Vector3d::Map(entry.pt.data());
-        const auto exit_pt = Vector3d::Map(exit.pt.data());
         while (sample_idx < lengths.size() && lengths[sample_idx] <= traveled + seg_len + eps) {
             const double s = lengths[sample_idx] - traveled;
             const double t = (seg_len > 0.0) ? (s / seg_len) : 0.0;
-            std::array<double, 3> pt{};
-            Vector3d::Map(pt.data()) = entry_pt + (exit_pt - entry_pt) * t;
-            result.push_back(std::move(pt));
+            auto barycentric_coords = interpolate_barycentric(entry_barycentric, exit_barycentric, t);
+            normalize_barycentric(barycentric_coords, BARY_EPS);
+            result.emplace_back(fid, barycentric_coords);
             ++sample_idx;
         }
         if (sample_idx == lengths.size()) {
@@ -1205,8 +1239,8 @@ WalkOnMeshSurface<Mesh>::operator()(const Mesh& mesh,
     static_assert(gpf::mesh_position_dim_v<Mesh> == 3);
 
     sample_idx = 0;
-    std::vector<std::array<double, 3>> result;
-    result.reserve(lengths.size());
+    std::vector<std::pair<gpf::FaceId, std::array<double, 3>>> result;
+    result.reserve(lengths.size() + 1);
     if (lengths.empty()) {
         return result;
     }
@@ -1214,19 +1248,24 @@ WalkOnMeshSurface<Mesh>::operator()(const Mesh& mesh,
     assert(std::abs(Eigen::Vector3d::Map(direction.data()).norm() - 1.0) < 1e-6);
 
     const auto face = mesh.face(start_fid);
-    const auto halfedges =
-      face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
-    const auto vertices =
-      halfedges | views::transform([&mesh](auto hid) { return mesh.he_from(hid); }) | ranges::to<std::vector>();
+    std::array<gpf::HalfedgeId, 3> halfedges{};
+    std::array<gpf::VertexId, 3> vertices{};
+    std::size_t n_halfedges = 0;
+    for (const auto he : face.halfedges()) {
+        halfedges[n_halfedges] = he.id;
+        vertices[n_halfedges] = he.from().id;
+        ++n_halfedges;
+    }
+    assert(n_halfedges == halfedges.size());
 
     Eigen::Vector2d dir{};
     std::array<double, 6> local_points{};
     ranges::fill(local_points, 0.0);
     Eigen::Vector2d start_proj{};
-    Eigen::Vector3d start_pt_3d{};
     const Eigen::Vector3d tri_a3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[0]).pt.data());
     const Eigen::Vector3d tri_b3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[1]).pt.data());
     const Eigen::Vector3d tri_c3 = Eigen::Vector3d::Map(mesh.vertex_prop(vertices[2]).pt.data());
+    std::array<double, 3> start_barycentric{};
     {
         Eigen::Vector3d xaxis = tri_b3 - tri_a3;
         const auto lab = xaxis.norm();
@@ -1254,13 +1293,14 @@ WalkOnMeshSurface<Mesh>::operator()(const Mesh& mesh,
         bary_points.append_range(local_points);
         bary_points.append_range(start_proj);
         auto start_bary = compute_bary_coordinates(bary_points);
-        if (normalize_barycentric(std::span<double, 3>{ start_bary.data(), 3 }, BARY_EPS)) {
-            start_proj = start_bary[0] * Eigen::Vector2d::Map(&local_points[0]) +
-                         start_bary[1] * Eigen::Vector2d::Map(&local_points[2]) +
-                         start_bary[2] * Eigen::Vector2d::Map(&local_points[4]);
+        start_barycentric = { start_bary[0], start_bary[1], start_bary[2] };
+        if (normalize_barycentric(std::span<double, 3>{ start_barycentric.data(), 3 }, BARY_EPS)) {
+            start_proj = start_barycentric[0] * Eigen::Vector2d::Map(&local_points[0]) +
+                         start_barycentric[1] * Eigen::Vector2d::Map(&local_points[2]) +
+                         start_barycentric[2] * Eigen::Vector2d::Map(&local_points[4]);
         }
-        start_pt_3d = start_bary[0] * tri_a3 + start_bary[1] * tri_b3 + start_bary[2] * tri_c3;
     }
+    result.emplace_back(start_fid, start_barycentric);
 
     const Eigen::Vector2d ray_ref = start_proj + dir;
     auto right_ori = predicates::orient2d(ray_ref.data(), start_proj.data(), &local_points[0]);
@@ -1292,16 +1332,18 @@ WalkOnMeshSurface<Mesh>::operator()(const Mesh& mesh,
     if (mesh.e_halfedge(start_edge_point.eid) != cross_hid_start) {
         t_along_exit = 1.0 - t_along_exit;
     }
+    std::array<double, 3> exit_barycentric_start{ 0.0, 0.0, 0.0 };
+    exit_barycentric_start[idx] = 1.0 - t_along_exit;
+    exit_barycentric_start[(idx + 1) % 3] = t_along_exit;
     const Eigen::Vector2d exit_2d_start = from_pt * (1.0 - t_along_exit) + to_pt * t_along_exit;
     const double seg_len_start = (exit_2d_start - start_proj).norm();
 
-    const auto exit_3d_start = Eigen::Vector3d::Map(start_edge_point.pt.data());
     while (sample_idx < lengths.size() && lengths[sample_idx] <= seg_len_start + eps) {
         const double s = lengths[sample_idx];
         const double t = (seg_len_start > 0.0) ? (s / seg_len_start) : 0.0;
-        std::array<double, 3> pt{};
-        Eigen::Vector3d::Map(pt.data()) = start_pt_3d + (exit_3d_start - start_pt_3d) * t;
-        result.push_back(std::move(pt));
+        auto barycentric_coords = interpolate_barycentric(start_barycentric, exit_barycentric_start, t);
+        normalize_barycentric(barycentric_coords, BARY_EPS);
+        result.emplace_back(start_fid, std::move(barycentric_coords));
         ++sample_idx;
     }
     if (sample_idx == lengths.size()) {

@@ -44,7 +44,7 @@ face_points(const Mesh3d& mesh, const gpf::FaceId fid)
     std::array<Eigen::Vector3d, 3> points;
     std::size_t idx = 0;
     for (const auto he : mesh.face(fid).halfedges()) {
-        points[idx++] = Eigen::Vector3d::Map(mesh.vertex_prop(he.to().id).pt.data());
+        points[idx++] = Eigen::Vector3d::Map(mesh.vertex_prop(he.from().id).pt.data());
     }
     assert(idx == 3);
     return points;
@@ -59,6 +59,29 @@ barycentric_coordinates(const Mesh3d& mesh, const gpf::FaceId fid, const Eigen::
     basis.col(1) = points[2] - points[0];
     const Eigen::Vector2d uv = (basis.transpose() * basis).ldlt().solve(basis.transpose() * (pt - points[0]));
     return { 1.0 - uv.x() - uv.y(), uv.x(), uv.y() };
+}
+
+Eigen::Vector3d
+point_from_barycentric(const Mesh3d& mesh, const auto& point)
+{
+    const auto points = face_points(mesh, point.first);
+    Eigen::Vector3d pt = Eigen::Vector3d::Zero();
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        pt += point.second[i] * points[i];
+    }
+    return pt;
+}
+
+void
+assert_valid_barycentric(const auto& point)
+{
+    double sum = 0.0;
+    for (const double coord : point.second) {
+        assert(coord > -1e-9);
+        assert(coord < 1.0 + 1e-9);
+        sum += coord;
+    }
+    assert(std::abs(sum - 1.0) < 1e-9);
 }
 
 bool
@@ -140,11 +163,22 @@ test_walk_on_mesh_surface()
         const auto result =
           gpf::walk_on_mesh_surface(mesh, fid, start_pt, direction, std::span<const double>{ lengths });
         assert(result.has_value());
-        assert(result->size() == lengths.size());
-        const auto& pts = *result;
-        assert(std::abs(pts[0][0] - start_pt[0]) < 1e-12);
-        assert(std::abs(pts[0][1] - start_pt[1]) < 1e-12);
-        assert(std::abs(pts[0][2] - start_pt[2]) < 1e-12);
+        assert(result->size() == lengths.size() + 1);
+        const auto& points = *result;
+        assert(points[0].first == fid);
+        const Eigen::Vector3d expected_start = Eigen::Vector3d::Map(start_pt.data());
+        assert(is_close(point_from_barycentric(mesh, points[0]), expected_start, 1e-12));
+        const auto expected_barycentric = barycentric_coordinates(mesh, fid, expected_start);
+        for (std::size_t i = 0; i < expected_barycentric.size(); ++i) {
+            assert(std::abs(points[0].second[i] - expected_barycentric[i]) < 1e-12);
+        }
+        for (const auto& point : points) {
+            assert_valid_barycentric(point);
+        }
+        for (std::size_t i = 0; i < lengths.size(); ++i) {
+            const Eigen::Vector3d expected_pt = expected_start + Eigen::Vector3d::Map(direction.data()) * lengths[i];
+            assert(is_close(point_from_barycentric(mesh, points[i + 1]), expected_pt, 1e-12));
+        }
     }
     {
         std::vector<double> points{ 0.0, 0.0, 1.0, 0.0, 0.0, 1.0 };
@@ -190,6 +224,14 @@ test_walk_on_mesh_surface()
                                              std::span<const double, 3>{ direction.data(), 3 },
                                              std::span<const double>{ lengths });
         assert(ret.has_value());
-        assert(ret->size() == lengths.size());
+        assert(ret->size() == lengths.size() + 1);
+        assert_valid_barycentric(ret->front());
+        const auto walked_start = point_from_barycentric(mesh, ret->front());
+        for (std::size_t i = 0; i < lengths.size(); ++i) {
+            const auto& point = (*ret)[i + 1];
+            assert_valid_barycentric(point);
+            const auto expected_pt = (walked_start + direction * lengths[i]).eval();
+            assert(is_close(point_from_barycentric(mesh, point), expected_pt, 1e-7));
+        }
     }
 }
