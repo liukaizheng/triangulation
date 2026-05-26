@@ -54,6 +54,7 @@ if(GPF_ALGORITHM_BUILD_TESTS)
     tests/test_triangulation.cpp
     tests/test_mesh_property.cpp
     tests/test_mesh_edge_collapse.cpp
+    tests/test_mesh_flood_fill.cpp
     tests/test_orthtree.cpp
     tests/test_project_polylines_on_mesh.cpp
   )

@@ -29,6 +29,10 @@ void
 test_orthtree_octree();
 void
 test_orthtree_traversal();
+void
+test_mesh_flood_fill_surround_single_face();
+void
+test_mesh_flood_fill_surround_two_faces();
 
 int
 main()
@@ -47,6 +51,8 @@ main()
     test_orthtree_quadtree();
     test_orthtree_octree();
     test_orthtree_traversal();
+    test_mesh_flood_fill_surround_single_face();
+    test_mesh_flood_fill_surround_two_faces();
 
     std::cout << "gpf_algorithm_tests: OK\n";
     return EXIT_SUCCESS;
