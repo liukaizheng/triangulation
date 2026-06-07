@@ -171,12 +171,13 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         }
         Eigen::Vector2d pa{ lca, 0.0 };
         auto pb = triangle_apex_from_base_lengths(lca, lab, lbc, false);
+        auto bottom_area = -pd[1] * lca;
 
         auto left_area = pd.cross(pb); // pc = {0.0, 0.0}
         auto right_area = (pb - pa).cross(pd - pa);
         constexpr double TRIANGLE_TEST_EPS = 1e-3;
-        auto area_sum = left_area + right_area;
-        if (left_area / area_sum < TRIANGLE_TEST_EPS || right_area / area_sum < TRIANGLE_TEST_EPS) {
+        auto area_sum = bottom_area + pb[1] * lca;
+        if (std::min(left_area, right_area) <= std::min(bottom_area, TRIANGLE_TEST_EPS * area_sum)) {
             continue;
         }
 
