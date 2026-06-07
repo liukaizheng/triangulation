@@ -190,53 +190,44 @@ identify_points(Mesh& mesh,
                 std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& edge_to_points_map,
                 std::vector<std::size_t>& face_point_indices,
                 std::vector<gpf::VertexId>& point_vertices,
-                const double eps)
+                const double sq_eps)
 {
     auto face = mesh.face(fid);
-    auto face_halfedges =
-      face.halfedges() | views::transform([](auto he) { return he.id; }) | ranges::to<std::vector>();
-    auto face_vertices = face_halfedges | views::transform([&mesh](auto hid) { return mesh.halfedge(hid).to().id; }) |
-                         ranges::to<std::vector>();
     auto ccs = make_face_coords<N>(mesh, fid);
-    std::vector<double> uvs((3 + face_point_indices.size()) * 2, 0.0);
-    if constexpr (N == 2) {
-        Vector2d::Map(uvs.data()) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[0]).pt).data());
-    }
-    Vector2d::Map(uvs.data() + 2) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[1]).pt).data());
-    Vector2d::Map(uvs.data() + 4) = Vector2d::Map(ccs.uv(mesh.vertex_prop(face_vertices[2]).pt).data());
-    std::size_t idx = 6;
-    for (const auto pid : face_point_indices) {
-        Vector2d::Map(uvs.data() + idx) = Vector2d::Map(ccs.uv(all_points[pid]).data());
-        idx += 2;
-    }
-    auto bary_coords = compute_bary_coordinates(uvs);
 
-    idx = 0;
+    std::size_t idx = 0;
     for (std::size_t i = 0; i < face_point_indices.size(); i++) {
         const auto pid = face_point_indices[i];
-        Vector3d bary_coord = Vector3d::Map(bary_coords.data() + i * 3).array().max(0.0).min(1.0);
-        Eigen::Index _, min_idx, max_idx;
-        bary_coord.maxCoeff(&max_idx, &_);
-        bary_coord.minCoeff(&min_idx, &_);
-        if (std::abs(bary_coord[max_idx] - 1.0) < eps) {
-            const auto vid = face_vertices[max_idx];
-            point_vertices[pid] = vid;
-            all_points[pid] = mesh.vertex_prop(vid).pt;
-        } else if (std::abs(bary_coord[min_idx]) < eps) {
-            const auto hid = face_halfedges[(min_idx + 2) % 3];
-            const auto eid = mesh.he_edge(hid);
-            const auto [v1, v2] = mesh.he_vertices(hid);
-            auto j = (min_idx + 1) % 3;
-            auto k = (min_idx + 2) % 3;
-            assert(v1 == face_vertices[j]);
-            assert(v2 == face_vertices[k]);
+        auto pt = VectorNd<N>::Map(all_points[pid].data());
+        bool finished = false;
+        for (const auto he : face.halfedges()) {
+            auto v = he.to();
+            if ((pt - VectorNd<N>::Map(v.prop().pt.data())).squaredNorm() < sq_eps) {
+                point_vertices[pid] = v.id;
+                all_points[pid] = v.prop().pt;
+                finished = true;
+                break;
+            }
+        }
+        if (finished) {
+            continue;
+        }
 
-            auto sum = bary_coord[j] + bary_coord[k];
-            auto t = bary_coord[j] / sum;
-            VectorNd<N>::Map(all_points[pid].data()) = t * VectorNd<N>::Map(mesh.vertex_prop(v1).pt.data()) +
-                                                       (1.0 - t) * VectorNd<N>::Map(mesh.vertex_prop(v2).pt.data());
-            edge_to_points_map[eid].emplace_back(pid);
-        } else {
+        for (const auto he : face.halfedges()) {
+            auto pa = VectorNd<N>::Map(he.from().prop().pt.data());
+            auto pb = VectorNd<N>::Map(he.to().prop().pt.data());
+            auto vab = (pb - pa).eval();
+            auto sq_len = vab.squaredNorm();
+            auto t = std::clamp(vab.dot(pt - pa) / sq_len, 0.0, 1.0);
+            auto mid_pt = ((1.0 - t) * pa + t * pb).eval();
+            if ((mid_pt - pt).squaredNorm() < sq_eps) {
+                pt = mid_pt;
+                edge_to_points_map[he.edge().id].emplace_back(pid);
+                finished = true;
+                break;
+            }
+        }
+        if (!finished) {
             if (idx != i) {
                 face_point_indices[idx] = pid;
             }
@@ -288,13 +279,14 @@ split_edge_by_points(Mesh& mesh,
         const auto pb = mesh.vertex_prop(vb).pt;
         const auto pa_ref = VectorNd<N>::Map(pa.data());
         const auto pb_ref = VectorNd<N>::Map(pb.data());
-        auto edge_len = (pb_ref - pa_ref).norm();
+        auto vab = (pb_ref - pa_ref).eval();
+        auto sq_edge_len = vab.squaredNorm();
         std::vector<std::size_t> indices(edge_point_indices.size());
         std::iota(indices.begin(), indices.end(), 0);
         const auto distances = edge_point_indices |
-                               std::views::transform([pa_ref, edge_len, &get_point](const auto pid) {
+                               std::views::transform([pa_ref, sq_edge_len, &vab, &get_point](const auto pid) {
                                    auto pt = get_point(pid);
-                                   return (VectorNd<N>::Map(pt.data()) - pa_ref).norm() / edge_len;
+                                   return std::max((VectorNd<N>::Map(pt.data()) - pa_ref).dot(vab), 0.0) / sq_edge_len;
                                }) |
                                std::ranges::to<std::vector>();
 
@@ -465,7 +457,8 @@ project_points_on_mesh(std::vector<std::array<double, N>>& points,
     std::vector<gpf::VertexId> point_vertices(points.size(), gpf::VertexId{});
     std::unordered_map<gpf::EdgeId, std::vector<std::size_t>> edge_to_points_map;
     for (auto& [fid, info] : face_info_map) {
-        info.ccs = identify_points<N>(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps);
+        info.ccs =
+          identify_points<N>(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps * eps);
     }
 
     // add ccs for all triangles sharing this edge to prepare triangulation
