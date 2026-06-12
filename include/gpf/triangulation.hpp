@@ -514,7 +514,7 @@ struct CDT
         predicates::Orientation left_ori = orient(vb, va, left_vid);
         predicates::Orientation right_ori = orient(vb, va, right_vid);
 
-        while (!is_positive(left_ori) && !is_positive(right_ori)) {
+        while (!is_positive(left_ori) && is_negative_ori(right_ori)) {
             hid = mesh.he_twin_next(hid);
             left_ori = right_ori;
             right_vid = mesh.he_to(hid);
@@ -967,7 +967,8 @@ triangulate_with_new_points(std::span<const double> points, std::span<const std:
     return triangulate_with_new_points(points, segments, segments.size() / 2, is_horizontal);
 }
 
-[[nodiscard]] inline auto trianulate_mesh(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
+[[nodiscard]] inline auto
+triangulate_mesh(std::span<const double> points, std::span<const std::size_t> segments, bool is_horizontal)
 {
     using namespace triangulation;
     auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);

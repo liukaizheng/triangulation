@@ -1,13 +1,40 @@
+#pragma once
+
 #include <algorithm>
-#include <gpf/ids.hpp>
 #include <queue>
 #include <unordered_set>
 
+#include <gpf/manifold_mesh.hpp>
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
+#include <predicates/predicates.hpp>
 #include <utility>
 
 namespace gpf {
+namespace detail {
+bool
+collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
+{
+    auto remove_vertex = mesh.vertex(remove_vid);
+    const auto* pb = mesh.vertex_prop(survive_vid).pt.data();
+    for (const auto he : remove_vertex.incoming_halfedges()) {
+        if (!he.face().id.valid()) {
+            continue;
+        }
+        auto va = he.from();
+        auto vc = he.next().to();
+        if (va.id == survive_vid || vc.id == survive_vid) {
+            continue;
+        }
+        if (predicates::orient2d(va.prop().pt.data(), pb, vc.prop().pt.data()) <= 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}
+
 template<typename Mesh>
 bool
 collapse_short_edges(Mesh& mesh, const double tol, bool skip_non_manifold_check)
@@ -78,7 +105,64 @@ collapse_short_edges(Mesh& mesh, const double tol, bool skip_non_manifold_check)
             auto& ep = e.prop();
             if (ep.need_update) {
                 update_edge_length<mesh_position_dim_v<Mesh>>(e);
-                if (ep.len < len) {
+                if (ep.len < tol) {
+                    queue.emplace(ep.len, e.id);
+                }
+                ep.need_update = false;
+            }
+        }
+    }
+    return collapsed;
+}
+
+template<typename VP, typename HP, typename EP, typename FP>
+    requires(mesh_position_dim_v<ManifoldMesh<VP, HP, EP, FP>> == 2)
+[[nodiscard]] bool
+collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh, const double tol, auto&& check_edge)
+{
+    bool collapsed = false;
+    std::priority_queue<std::pair<double, EdgeId>,
+                        std::vector<std::pair<double, EdgeId>>,
+                        std::greater<std::pair<double, EdgeId>>>
+      queue;
+
+    for (auto edge : mesh.edges()) {
+        if (edge.prop().len < tol) {
+            queue.emplace(edge.prop().len, edge.id);
+        }
+    }
+
+    while (!queue.empty()) {
+        auto [len, eid] = queue.top();
+        queue.pop();
+        if (mesh.edge_is_deleted(eid) || mesh.edge_prop(eid).len != len) {
+            continue;
+        }
+        auto check_ret = check_edge(mesh.edge(eid));
+        if (!check_ret.has_value()) {
+            continue;
+        }
+
+        auto [va, vb, can_swap] = *check_ret;
+        if (!detail::collapse_would_flip(mesh, va, vb)) {
+            if (can_swap && detail::collapse_would_flip(mesh, vb, va)) {
+                std::swap(va, vb);
+            } else {
+                continue;
+            }
+        }
+
+        for (auto e : mesh.vertex(vb).edges()) {
+            e.prop().need_update = true;
+        }
+
+        mesh.collapse_edge(eid, va, vb);
+        collapsed = true;
+        for (auto e : mesh.vertex(va).edges()) {
+            auto& ep = e.prop();
+            if (ep.need_update) {
+                update_edge_length<2>(e);
+                if (ep.len < tol) {
                     queue.emplace(ep.len, e.id);
                 }
                 ep.need_update = false;
@@ -99,6 +183,7 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
       queue;
     std::array<HalfedgeId, 3> tri_halfedges;
     std::array<double, 3> tri_edge_lengths;
+    std::unordered_set<std::pair<VertexId, VertexId>, detail::PairHash> flipped_edges;
     auto metric_pair = [&mesh, &tri_halfedges, &tri_edge_lengths, &queue, tol](const gpf::FaceId fid) {
         auto face = mesh.face(fid);
         if (mesh.face_is_deleted(face.id)) {
@@ -133,10 +218,14 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         return std::make_pair(diff, tri_halfedges[max_idx]);
     };
 
-    auto enqueue = [&metric_pair, &queue, tol](const gpf::FaceId fid) {
+    auto enqueue = [&metric_pair, &queue, &mesh, &flipped_edges, tol](const gpf::FaceId fid) {
         auto pair = metric_pair(fid);
         if (pair.second.valid() && pair.first < 2.0 * tol) {
-            queue.push(std::move(pair));
+            auto [va, vb] = mesh.he_vertices(pair.second);
+            auto verts = va < vb ? std::make_pair(va, vb) : std::make_pair(vb, va);
+            if (!flipped_edges.contains(verts)) {
+                queue.push(std::move(pair));
+            }
         }
     };
 
@@ -148,7 +237,12 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         const auto old_pair = queue.top();
         queue.pop();
         const auto curr_pair = metric_pair(mesh.he_face(old_pair.second));
-        if (curr_pair != old_pair) {
+        auto [va, vb] = mesh.he_vertices(curr_pair.second);
+        if (va > vb) {
+            std::swap(va, vb);
+        }
+        auto vert_pair = std::make_pair(va, vb);
+        if (curr_pair != old_pair || flipped_edges.contains(vert_pair)) {
             continue;
         }
         auto hac = curr_pair.second;
@@ -182,6 +276,7 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         }
 
         collapsed = true;
+        flipped_edges.emplace(std::move(vert_pair));
         mesh.collapse_triangle_on_edge(hac);
         update_edge_length<mesh_position_dim_v<Mesh>>(mesh.halfedge(hca).edge());
         enqueue(mesh.he_face(hac));

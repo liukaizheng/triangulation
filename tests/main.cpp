@@ -33,10 +33,25 @@ void
 test_mesh_flood_fill_surround_single_face();
 void
 test_mesh_flood_fill_surround_two_faces();
+void
+test_collapse_short_edges_2d_skips_flip();
+void
+test_collapse_short_edges_2d_collapses();
+void
+test_collapse_short_edges_2d_swaps_direction();
+void
+test_collapse_1000_points();
+void
+test_collapse_on_triangle();
 
 int
 main()
 {
+    test_collapse_on_triangle();
+    test_collapse_1000_points();
+    test_collapse_short_edges_2d_skips_flip();
+    test_collapse_short_edges_2d_collapses();
+    test_collapse_short_edges_2d_swaps_direction();
     test_project_polylines_on_mesh_2d_points();
     test_walk_on_mesh_surface();
     test_mesh_edge_collapse1();
