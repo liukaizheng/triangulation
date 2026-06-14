@@ -4,6 +4,7 @@
 #include <queue>
 #include <unordered_set>
 
+#include <gpf/detail.hpp>
 #include <gpf/manifold_mesh.hpp>
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
@@ -33,7 +34,7 @@ collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
     return true;
 }
 
-}
+} // namespace detail
 
 template<typename Mesh>
 bool
@@ -222,7 +223,7 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         auto pair = metric_pair(fid);
         if (pair.second.valid() && pair.first < 2.0 * tol) {
             auto [va, vb] = mesh.he_vertices(pair.second);
-            auto verts = va < vb ? std::make_pair(va, vb) : std::make_pair(vb, va);
+            auto verts = detail::ordered_pair(va, vb);
             if (!flipped_edges.contains(verts)) {
                 queue.push(std::move(pair));
             }
@@ -237,12 +238,12 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         const auto old_pair = queue.top();
         queue.pop();
         const auto curr_pair = metric_pair(mesh.he_face(old_pair.second));
-        auto [va, vb] = mesh.he_vertices(curr_pair.second);
-        if (va > vb) {
-            std::swap(va, vb);
+        if (curr_pair != old_pair) {
+            continue;
         }
-        auto vert_pair = std::make_pair(va, vb);
-        if (curr_pair != old_pair || flipped_edges.contains(vert_pair)) {
+        auto [va, vb] = mesh.he_vertices(curr_pair.second);
+        auto vert_pair = detail::ordered_pair(va, vb);
+        if (flipped_edges.contains(vert_pair)) {
             continue;
         }
         auto hac = curr_pair.second;
@@ -276,8 +277,9 @@ collapse_slivers_on_longest_edge(Mesh& mesh, const double tol)
         }
 
         collapsed = true;
-        flipped_edges.emplace(std::move(vert_pair));
         mesh.collapse_triangle_on_edge(hac);
+        auto [new_va, new_vb] = mesh.he_vertices(hac);
+        flipped_edges.emplace(detail::ordered_pair(new_va, new_vb));
         update_edge_length<mesh_position_dim_v<Mesh>>(mesh.halfedge(hca).edge());
         enqueue(mesh.he_face(hac));
         enqueue(mesh.he_face(hca));
