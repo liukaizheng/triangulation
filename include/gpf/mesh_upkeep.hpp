@@ -1,18 +1,31 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
+#include <functional>
+#include <optional>
 #include <queue>
+#include <tuple>
 #include <unordered_set>
+#include <utility>
+#include <vector>
+
+#include <predicates/predicates.hpp>
 
 #include <gpf/detail.hpp>
 #include <gpf/manifold_mesh.hpp>
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
-#include <predicates/predicates.hpp>
-#include <utility>
 
 namespace gpf {
 namespace detail {
+using CollapseShortEdgeCheckResultT = std::optional<std::tuple<VertexId, VertexId, bool>>;
+
+template<typename CheckEdge, typename Mesh>
+concept CollapseShortEdgeChecker = requires(CheckEdge check_edge) {
+    { check_edge(std::declval<typename Mesh::Edge>()) } -> std::same_as<CollapseShortEdgeCheckResultT>;
+};
+
 bool
 collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
 {
@@ -119,7 +132,9 @@ collapse_short_edges(Mesh& mesh, const double tol, bool skip_non_manifold_check)
 template<typename VP, typename HP, typename EP, typename FP>
     requires(mesh_position_dim_v<ManifoldMesh<VP, HP, EP, FP>> == 2)
 [[nodiscard]] bool
-collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh, const double tol, auto&& check_edge)
+collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh,
+                     const double tol,
+                     detail::CollapseShortEdgeChecker<ManifoldMesh<VP, HP, EP, FP>> auto&& check_edge)
 {
     bool collapsed = false;
     std::priority_queue<std::pair<double, EdgeId>,
