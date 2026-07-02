@@ -346,8 +346,10 @@ test_collapse_on_triangle()
         const auto i = v.id.idx;
         v.prop().pt = { points[i * 2], points[i * 2 + 1] };
     }
+
     write_off("123_before.off", mesh);
     upkeep_mesh(mesh, vertex_on_edge, 0.1);
+
     write_off("123_after.off", mesh);
     const auto a = 2;
 }

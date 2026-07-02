@@ -47,6 +47,22 @@ collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
     return true;
 }
 
+bool
+collapse_would_flip(const auto& mesh, const double* pb, VertexId move_vid, const gpf::FaceId remove_fid)
+{
+    auto remove_vertex = mesh.vertex(move_vid);
+    for (const auto he : remove_vertex.incoming_halfedges()) {
+        if (!he.face().id.valid() || he.face().id == remove_fid) {
+            continue;
+        }
+        auto va = he.from();
+        auto vc = he.next().to();
+        if (predicates::orient2d(va.prop().pt.data(), pb, vc.prop().pt.data()) <= 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace detail
 
 template<typename Mesh>
@@ -186,6 +202,128 @@ collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh,
         }
     }
     return collapsed;
+}
+
+/// Collapses or moves near-collinear boundary-adjacent vertices around the boundary loop containing start_hid.
+/// Edge lengths must be initialized, and edge properties must expose len and need_update.
+template<typename VP, typename HP, typename EP, typename FP>
+    requires(mesh_position_dim_v<ManifoldMesh<VP, HP, EP, FP>> == 2)
+void
+collapse_points_on_boundary(ManifoldMesh<VP, HP, EP, FP>& mesh, gpf::HalfedgeId start_hid, const double tol)
+{
+    std::priority_queue<std::pair<double, HalfedgeId>,
+                        std::vector<std::pair<double, HalfedgeId>>,
+                        std::greater<std::pair<double, HalfedgeId>>>
+      queue;
+    auto metric_pair = [&mesh, &queue, tol](const auto ha) -> std::optional<std::pair<double, HalfedgeId>> {
+        auto hb = ha.next();
+        if (mesh.v_is_boundary(hb.to().id)) {
+            return {};
+        }
+        auto hc = hb.next();
+
+        auto la = ha.edge().prop().len;
+        auto lb = hb.edge().prop().len;
+        auto lc = hc.edge().prop().len;
+        if (la <= lb || lb <= lc) {
+            return {};
+        }
+
+        if (la + 2.0 * tol <= lb + lc) {
+            return {};
+        }
+        return std::make_pair(lb + lc - la, ha.id);
+    };
+    auto curr_he = mesh.halfedge(start_hid);
+    while (true) {
+        auto pair = metric_pair(curr_he.twin());
+        if (pair) {
+            queue.push(*pair);
+        }
+
+        curr_he = curr_he.prev();
+        if (curr_he.id == start_hid) {
+            break;
+        }
+    }
+
+    while (!queue.empty()) {
+        auto [diff, hid] = queue.top();
+        queue.pop();
+        auto ha = mesh.halfedge(hid);
+        auto hb = ha.next();
+        if (!hb.twin().face().id.valid()) {
+            continue;
+        }
+        auto hc = hb.next();
+        if (!hc.twin().face().id.valid()) {
+            continue;
+        }
+        auto la = ha.edge().prop().len;
+        auto lb = hb.edge().prop().len;
+        auto lc = hc.edge().prop().len;
+        if (lb + lc - la != diff) {
+            continue;
+        }
+        auto pc = triangle_apex_from_base_lengths(la, lb, lc, false);
+        if (pc[1] >= tol) {
+            continue;
+        }
+        bool collapse_left_vid = pc[0] < tol;
+        bool collapse_right_vid = pc[0] + tol > la;
+        if (collapse_left_vid || collapse_right_vid) {
+            gpf::VertexId survive_vid{}, remove_vid{};
+            gpf::EdgeId collapse_eid{};
+            if (collapse_left_vid) {
+                survive_vid = hc.to().id;
+                remove_vid = hb.to().id;
+                collapse_eid = hc.edge().id;
+            } else {
+                survive_vid = ha.to().id;
+                remove_vid = hb.to().id;
+                collapse_eid = hb.edge().id;
+            }
+            if (detail::collapse_would_flip(mesh, survive_vid, remove_vid)) {
+                for (auto e : mesh.vertex(remove_vid).edges()) {
+                    e.prop().need_update = true;
+                }
+                mesh.collapse_edge(collapse_eid, survive_vid, remove_vid);
+                for (auto e : mesh.vertex(survive_vid).edges()) {
+                    if (e.prop().need_update) {
+                        update_edge_length<2>(e);
+                        e.prop().need_update = false;
+                    }
+                }
+                if (auto new_pair = metric_pair(ha); new_pair) {
+                    queue.push(*new_pair);
+                }
+            }
+        } else {
+            std::array<double, 2> new_pt{};
+            double s = pc[0] / la;
+            Eigen::Vector2d::Map(new_pt.data()) = (1.0 - s) * Eigen::Vector2d::Map(hc.to().prop().pt.data()) +
+                                                  s * Eigen::Vector2d::Map(ha.to().prop().pt.data());
+            if (detail::collapse_would_flip(mesh, new_pt.data(), hb.to().id, ha.face().id)) {
+                for (auto e : hb.to().edges()) {
+                    e.prop().need_update = true;
+                }
+                hb.to().prop().pt = new_pt;
+                mesh.remove_face(ha.face().id);
+                assert(!hb.face().id.valid());
+                assert(!hc.face().id.valid());
+                for (auto e : hb.to().edges()) {
+                    update_edge_length<2>(e);
+                    e.prop().need_update = false;
+                }
+                if (auto new_pair = metric_pair(hb.twin()); new_pair) {
+                    queue.push(*new_pair);
+                }
+                if (auto new_pair = metric_pair(hc.twin()); new_pair) {
+                    queue.push(*new_pair);
+                }
+            }
+        }
+    }
 }
 
 template<typename Mesh>
