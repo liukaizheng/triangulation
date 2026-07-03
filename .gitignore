@@ -7,3 +7,4 @@ build-*/
 .DS_Store
 .cache
 .cazean
+compile_commands.json

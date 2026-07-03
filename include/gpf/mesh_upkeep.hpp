@@ -27,12 +27,16 @@ concept CollapseShortEdgeChecker = requires(CheckEdge check_edge) {
 };
 
 bool
-collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
+collapse_would_flip(const auto& mesh,
+                    const double* pb,
+                    VertexId survive_vid,
+                    VertexId remove_vid,
+                    const std::vector<FaceId>* to_remove_faces)
 {
     auto remove_vertex = mesh.vertex(remove_vid);
-    const auto* pb = mesh.vertex_prop(survive_vid).pt.data();
     for (const auto he : remove_vertex.incoming_halfedges()) {
-        if (!he.face().id.valid()) {
+        if (!he.face().id.valid() ||
+            (to_remove_faces && std::ranges::find(*to_remove_faces, he.face().id) != to_remove_faces->end())) {
             continue;
         }
         auto va = he.from();
@@ -40,23 +44,6 @@ collapse_would_flip(const auto& mesh, VertexId survive_vid, VertexId remove_vid)
         if (va.id == survive_vid || vc.id == survive_vid) {
             continue;
         }
-        if (predicates::orient2d(va.prop().pt.data(), pb, vc.prop().pt.data()) <= 0.0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool
-collapse_would_flip(const auto& mesh, const double* pb, VertexId move_vid, const gpf::FaceId remove_fid)
-{
-    auto remove_vertex = mesh.vertex(move_vid);
-    for (const auto he : remove_vertex.incoming_halfedges()) {
-        if (!he.face().id.valid() || he.face().id == remove_fid) {
-            continue;
-        }
-        auto va = he.from();
-        auto vc = he.next().to();
         if (predicates::orient2d(va.prop().pt.data(), pb, vc.prop().pt.data()) <= 0.0) {
             return false;
         }
@@ -176,8 +163,8 @@ collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh,
         }
 
         auto [va, vb, can_swap] = *check_ret;
-        if (!detail::collapse_would_flip(mesh, va, vb)) {
-            if (can_swap && detail::collapse_would_flip(mesh, vb, va)) {
+        if (!detail::collapse_would_flip(mesh, mesh.vertex_prop(va).pt.data(), va, vb, nullptr)) {
+            if (can_swap && detail::collapse_would_flip(mesh, mesh.vertex_prop(vb).pt.data(), vb, va, nullptr)) {
                 std::swap(va, vb);
             } else {
                 continue;
@@ -204,43 +191,91 @@ collapse_short_edges(ManifoldMesh<VP, HP, EP, FP>& mesh,
     return collapsed;
 }
 
-/// Collapses or moves near-collinear boundary-adjacent vertices around the boundary loop containing start_hid.
-/// Edge lengths must be initialized, and edge properties must expose len and need_update.
+/// Collapses or moves near-collinear interior vertices adjacent to the boundary loop containing start_hid.
+///
+/// start_hid must be on that boundary loop. Boundary edges must have a valid parent value grouping the original
+/// polyline segment they belong to; edges with kInvalidIndex parent are not valid input for this routine. Edge
+/// lengths must already be initialized. Edge properties must expose len, parent, and need_update; this function
+/// updates len/parent for modified boundary edges and uses need_update as temporary scratch state.
 template<typename VP, typename HP, typename EP, typename FP>
     requires(mesh_position_dim_v<ManifoldMesh<VP, HP, EP, FP>> == 2)
 void
 collapse_points_on_boundary(ManifoldMesh<VP, HP, EP, FP>& mesh, gpf::HalfedgeId start_hid, const double tol)
 {
-    std::priority_queue<std::pair<double, HalfedgeId>,
-                        std::vector<std::pair<double, HalfedgeId>>,
-                        std::greater<std::pair<double, HalfedgeId>>>
+    std::priority_queue<std::tuple<double, double, VertexId>,
+                        std::vector<std::tuple<double, double, VertexId>>,
+                        std::greater<std::tuple<double, double, VertexId>>>
       queue;
-    auto metric_pair = [&mesh, &queue, tol](const auto ha) -> std::optional<std::pair<double, HalfedgeId>> {
-        auto hb = ha.next();
-        if (mesh.v_is_boundary(hb.to().id)) {
-            return {};
-        }
-        auto hc = hb.next();
-
-        auto la = ha.edge().prop().len;
-        auto lb = hb.edge().prop().len;
-        auto lc = hc.edge().prop().len;
-        if (la <= lb || lb <= lc) {
-            return {};
+    std::vector<std::vector<std::tuple<double, double, HalfedgeId, HalfedgeId, std::vector<FaceId>>>>
+      vertex_collapse_data(mesh.n_vertices_capacity());
+    auto enqueue = [&queue, &vertex_collapse_data, tol](const auto& mesh, const auto hab_id) {
+        const auto hab = mesh.halfedge(hab_id);
+        auto hbc = hab.next();
+        const auto vc_id = hbc.to().id;
+        if (mesh.v_is_boundary(vc_id)) {
+            return;
         }
 
-        if (la + 2.0 * tol <= lb + lc) {
-            return {};
+        if (std::ranges::any_of(vertex_collapse_data[vc_id.idx], [fid = hab.face().id](const auto& tuple) {
+                return std::ranges::find(std::get<4>(tuple), fid) != std::get<4>(tuple).end();
+            })) {
+            return;
         }
-        return std::make_pair(lb + lc - la, ha.id);
+
+        auto hca = hbc.next();
+        std::vector<gpf::FaceId> to_remove_faces;
+        const auto parent = hab.edge().prop().parent;
+        gpf::HalfedgeId left_boundary_hid{};
+        gpf::HalfedgeId right_boundary_hid{};
+        double bottom_len{ 0.0 };
+        {
+            auto curr_he = hca.twin();
+            while (true) {
+                auto bottom_edge = curr_he.prev().edge();
+                if (bottom_edge.prop().parent != parent) {
+                    break;
+                }
+                to_remove_faces.push_back(curr_he.face().id);
+                curr_he = curr_he.next().twin();
+                bottom_len += bottom_edge.prop().len;
+            }
+            left_boundary_hid = curr_he.id;
+        }
+        std::ranges::reverse(to_remove_faces);
+        to_remove_faces.push_back(hab.face().id);
+        bottom_len += hab.edge().prop().len;
+        {
+            auto curr_he = hbc.twin();
+            while (true) {
+                auto bottom_edge = curr_he.next().edge();
+                if (bottom_edge.prop().parent != parent) {
+                    break;
+                }
+                to_remove_faces.push_back(curr_he.face().id);
+                curr_he = curr_he.prev().twin();
+                bottom_len += bottom_edge.prop().len;
+            }
+            right_boundary_hid = curr_he.id;
+        }
+
+        auto left_len = mesh.halfedge(left_boundary_hid).edge().prop().len;
+        auto right_len = mesh.halfedge(right_boundary_hid).edge().prop().len;
+        if (bottom_len <= left_len || bottom_len <= right_len) {
+            return;
+        }
+
+        auto diff = left_len + right_len - bottom_len;
+        if (2.0 * tol <= diff) {
+            return;
+        }
+
+        vertex_collapse_data[vc_id.idx].emplace_back(
+          diff, bottom_len, left_boundary_hid, right_boundary_hid, std::move(to_remove_faces));
+        queue.emplace(diff, bottom_len, vc_id);
     };
     auto curr_he = mesh.halfedge(start_hid);
     while (true) {
-        auto pair = metric_pair(curr_he.twin());
-        if (pair) {
-            queue.push(*pair);
-        }
-
+        enqueue(mesh, curr_he.twin().id);
         curr_he = curr_he.prev();
         if (curr_he.id == start_hid) {
             break;
@@ -248,79 +283,100 @@ collapse_points_on_boundary(ManifoldMesh<VP, HP, EP, FP>& mesh, gpf::HalfedgeId 
     }
 
     while (!queue.empty()) {
-        auto [diff, hid] = queue.top();
+        auto [diff, lab, vc] = queue.top();
         queue.pop();
-        auto ha = mesh.halfedge(hid);
-        auto hb = ha.next();
-        if (!hb.twin().face().id.valid()) {
+        if (mesh.vertex_is_deleted(vc) || mesh.v_is_boundary(vc)) {
             continue;
         }
-        auto hc = hb.next();
-        if (!hc.twin().face().id.valid()) {
+        auto entry = std::ranges::find_if(vertex_collapse_data[vc.idx], [diff, lab](const auto& tuple) {
+            return std::get<0>(tuple) == diff && std::get<1>(tuple) == lab;
+        });
+        assert(entry != vertex_collapse_data[vc.idx].end());
+
+        auto [_, __, hac, hcb, to_remove_faces] = *entry;
+
+        auto lbc = mesh.halfedge(hcb).edge().prop().len;
+        auto lca = mesh.halfedge(hac).edge().prop().len;
+        if (lbc + lca - lab != diff) {
             continue;
         }
-        auto la = ha.edge().prop().len;
-        auto lb = hb.edge().prop().len;
-        auto lc = hc.edge().prop().len;
-        if (lb + lc - la != diff) {
-            continue;
-        }
-        auto pc = triangle_apex_from_base_lengths(la, lb, lc, false);
+        auto pc = triangle_apex_from_base_lengths(lab, lbc, lca, false);
         if (pc[1] >= tol) {
             continue;
         }
-        bool collapse_left_vid = pc[0] < tol;
-        bool collapse_right_vid = pc[0] + tol > la;
-        if (collapse_left_vid || collapse_right_vid) {
+        const auto va = mesh.halfedge(hac).from().id;
+        const auto vb = mesh.halfedge(hcb).to().id;
+        const auto parent = mesh.halfedge(hac).twin().next().edge().prop().parent;
+        assert(parent != gpf::kInvalidIndex);
+
+        bool collapse_left = pc[0] < tol;
+        bool collapse_right = pc[0] + tol > lab;
+        if (collapse_left || collapse_right) {
             gpf::VertexId survive_vid{}, remove_vid{};
             gpf::EdgeId collapse_eid{};
-            if (collapse_left_vid) {
-                survive_vid = hc.to().id;
-                remove_vid = hb.to().id;
-                collapse_eid = hc.edge().id;
+            gpf::HalfedgeId new_bottom_hid{};
+            if (collapse_left) {
+                survive_vid = va;
+                collapse_eid = mesh.he_edge(hac);
+                new_bottom_hid = hcb;
             } else {
-                survive_vid = ha.to().id;
-                remove_vid = hb.to().id;
-                collapse_eid = hb.edge().id;
+                survive_vid = vb;
+                collapse_eid = mesh.he_edge(hcb);
+                new_bottom_hid = hac;
             }
-            if (detail::collapse_would_flip(mesh, survive_vid, remove_vid)) {
-                for (auto e : mesh.vertex(remove_vid).edges()) {
+            if (detail::collapse_would_flip(
+                  mesh, mesh.vertex_prop(survive_vid).pt.data(), survive_vid, vc, &to_remove_faces)) {
+                for (auto e : mesh.vertex(vc).edges()) {
                     e.prop().need_update = true;
                 }
-                mesh.collapse_edge(collapse_eid, survive_vid, remove_vid);
+                if (to_remove_faces.size() > std::size_t{ 1 }) {
+                    for (const auto fid : to_remove_faces) {
+                        mesh.remove_face(fid);
+                    }
+                } else {
+                    new_bottom_hid = mesh.halfedge(hac).twin().next().id;
+                }
+                mesh.collapse_edge(collapse_eid, survive_vid, vc);
+                assert(mesh.halfedge(new_bottom_hid).face().id.valid());
+                assert(!mesh.halfedge(new_bottom_hid).twin().face().id.valid());
+
                 for (auto e : mesh.vertex(survive_vid).edges()) {
                     if (e.prop().need_update) {
                         update_edge_length<2>(e);
                         e.prop().need_update = false;
                     }
                 }
-                if (auto new_pair = metric_pair(ha); new_pair) {
-                    queue.push(*new_pair);
-                }
+                mesh.halfedge(new_bottom_hid).edge().prop().parent = parent;
+                enqueue(mesh, new_bottom_hid);
             }
         } else {
             std::array<double, 2> new_pt{};
-            double s = pc[0] / la;
-            Eigen::Vector2d::Map(new_pt.data()) = (1.0 - s) * Eigen::Vector2d::Map(hc.to().prop().pt.data()) +
-                                                  s * Eigen::Vector2d::Map(ha.to().prop().pt.data());
-            if (detail::collapse_would_flip(mesh, new_pt.data(), hb.to().id, ha.face().id)) {
-                for (auto e : hb.to().edges()) {
+            double s = pc[0] / lab;
+            Eigen::Vector2d::Map(new_pt.data()) = (1.0 - s) * Eigen::Vector2d::Map(mesh.vertex_prop(va).pt.data()) +
+                                                  s * Eigen::Vector2d::Map(mesh.vertex_prop(vb).pt.data());
+            if (detail::collapse_would_flip(mesh, new_pt.data(), {}, vc, &to_remove_faces)) {
+                for (auto e : mesh.vertex(vc).edges()) {
                     e.prop().need_update = true;
                 }
-                hb.to().prop().pt = new_pt;
-                mesh.remove_face(ha.face().id);
-                assert(!hb.face().id.valid());
-                assert(!hc.face().id.valid());
-                for (auto e : hb.to().edges()) {
-                    update_edge_length<2>(e);
-                    e.prop().need_update = false;
+                mesh.vertex(vc).prop().pt = new_pt;
+                for (const auto fid : to_remove_faces) {
+                    mesh.remove_face(fid);
                 }
-                if (auto new_pair = metric_pair(hb.twin()); new_pair) {
-                    queue.push(*new_pair);
+
+                assert(!mesh.halfedge(hac).twin().face().id.valid());
+                assert(!mesh.halfedge(hcb).twin().face().id.valid());
+                assert(mesh.halfedge(hcb).twin().next().id == mesh.he_twin(hac));
+                mesh.halfedge(hac).edge().prop().parent = parent;
+                mesh.halfedge(hcb).edge().prop().parent = parent;
+
+                for (auto e : mesh.vertex(vc).edges()) {
+                    if (e.prop().need_update) {
+                        update_edge_length<2>(e);
+                        e.prop().need_update = false;
+                    }
                 }
-                if (auto new_pair = metric_pair(hc.twin()); new_pair) {
-                    queue.push(*new_pair);
-                }
+                enqueue(mesh, hac);
+                enqueue(mesh, hcb);
             }
         }
     }

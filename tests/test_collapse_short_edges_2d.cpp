@@ -1,5 +1,3 @@
-#include "gpf/ids.hpp"
-#include "gpf/triangulation.hpp"
 #include <array>
 #include <cassert>
 #include <fstream>
@@ -9,6 +7,9 @@
 #include <random>
 #include <tuple>
 #include <vector>
+
+#include "gpf/ids.hpp"
+#include "gpf/triangulation.hpp"
 
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
@@ -24,6 +25,7 @@ struct VertexProp
 struct EdgeProp
 {
     double len = 0.0;
+    std::size_t parent{ gpf::kInvalidIndex };
     bool need_update{ false };
 };
 
@@ -32,28 +34,19 @@ using Mesh = gpf::ManifoldMesh<VertexProp, gpf::Empty, EdgeProp>;
 void
 write_off(const char* path, const Mesh& mesh)
 {
-    constexpr std::size_t kInvalidIndex = std::numeric_limits<std::size_t>::max();
-
-    std::vector<std::size_t> old_to_new(mesh.n_vertices_capacity(), kInvalidIndex);
-    std::size_t n_vertices = 0;
-    for (const auto v : mesh.vertices()) {
-        old_to_new[v.id.idx] = n_vertices++;
-    }
-
     std::ofstream out(path);
     assert(out);
     out << "OFF\n";
-    out << n_vertices << ' ' << mesh.n_faces() << " 0\n";
+    out << mesh.n_vertices_capacity() << ' ' << mesh.n_faces() << " 0\n";
     out << std::setprecision(17);
-    for (const auto v : mesh.vertices()) {
-        const auto& pt = v.prop().pt;
+    for (std::size_t i{ 0 }; i < mesh.n_vertices_capacity(); ++i) {
+        const auto& pt = mesh.vertex(gpf::VertexId{ i }).prop().pt;
         out << pt[0] << ' ' << pt[1] << " 0\n";
     }
     for (const auto f : mesh.faces()) {
         std::vector<std::size_t> face_vertices;
         for (const auto he : f.halfedges()) {
-            const auto vertex_index = old_to_new[he.from().id.idx];
-            assert(vertex_index != kInvalidIndex);
+            const auto vertex_index = he.from().id.idx;
             face_vertices.push_back(vertex_index);
         }
         out << face_vertices.size();
@@ -346,10 +339,58 @@ test_collapse_on_triangle()
         const auto i = v.id.idx;
         v.prop().pt = { points[i * 2], points[i * 2 + 1] };
     }
+    {
+        auto first_hid = mesh.vertex(gpf::VertexId{ 0 }).halfedge().prev().id;
+        std::size_t parent{ 0 };
+        std::size_t count{ 0 };
+        auto curr_he = mesh.halfedge(first_hid);
+        while (true) {
+            curr_he.edge().prop().parent = parent;
+            count += 1;
+            curr_he = curr_he.prev();
+            if (curr_he.id == first_hid) {
+                break;
+            }
+            if (count == n_on_boundary) {
+                count = 0;
+                parent += 1;
+            }
+        }
+    }
+    write_off("123_origin.off", mesh);
 
-    write_off("123_before.off", mesh);
-    upkeep_mesh(mesh, vertex_on_edge, 0.1);
+    gpf::update_edge_lengths<2>(mesh);
+    // upkeep_mesh(mesh, vertex_on_edge, 0.1);
+    // write_off("123_upkeep.off", mesh);
 
-    write_off("123_after.off", mesh);
+    gpf::collapse_points_on_boundary(mesh, mesh.vertex(gpf::VertexId{ 0 }).halfedge().id, 0.1);
+    std::vector<gpf::HalfedgeId> boundary_halfedges;
+    for (const auto he : mesh.halfedges()) {
+        if (!he.twin().face().id.valid()) {
+            boundary_halfedges.push_back(he.id);
+        }
+    }
+    for (const auto hid : boundary_halfedges) {
+        auto he = mesh.halfedge(hid);
+        if (he.from().halfedge().face().id.valid()) {
+            const auto a = 2;
+        }
+        if (he.to().halfedge().face().id.valid()) {
+            const auto a = 2;
+        }
+    }
+    std::vector<gpf::HalfedgeId> boundary_halfedges1;
+    auto first_hid = mesh.vertex(gpf::VertexId{ 0 }).halfedge().id;
+    auto curr_hid = first_hid;
+    while (true) {
+        boundary_halfedges1.push_back(curr_hid);
+        auto next_hid = mesh.he_next(curr_hid);
+        if (next_hid == first_hid) {
+            break;
+        }
+        curr_hid = next_hid;
+    }
+
+    write_off("123_collapsed.off", mesh);
     const auto a = 2;
 }
