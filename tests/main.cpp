@@ -44,9 +44,12 @@ test_collapse_1000_points();
 void
 test_collapse_on_triangle();
 
+void
+test_degenerate();
 int
 main()
 {
+    test_degenerate();
     test_collapse_on_triangle();
     test_collapse_1000_points();
     test_collapse_short_edges_2d_skips_flip();

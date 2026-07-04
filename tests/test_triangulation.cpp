@@ -21,6 +21,15 @@ write_obj(const std::string& name, const std::vector<double>& points, const std:
 }
 
 void
+test_degenerate()
+{
+    std::vector<double> points{ 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0 };
+    std::vector<std::size_t> segments{ 0, 1, 1, 2, 2, 3, 3, 0 };
+    auto triangles = gpf::triangulate_polygon(points, segments, true);
+    assert(triangles.size() == 0);
+}
+
+void
 test_triangulate_bug2()
 {
     std::vector<double> points{ 0.0,

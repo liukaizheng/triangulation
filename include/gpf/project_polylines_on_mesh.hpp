@@ -167,7 +167,7 @@ normalize_barycentric(std::span<double, 3> bary, const double eps) noexcept
 {
     bool changed = false;
     for (double& val : bary) {
-        if (val < eps) [[unlikely]] {
+        if (val < eps && val != 0.0) [[unlikely]] {
             val = 0.0;
             changed = true;
         }

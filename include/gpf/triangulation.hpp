@@ -808,10 +808,11 @@ alternate_axes(const double* points, std::span<VertexId> indices, bool is_horizo
 
 // Set boundary vertex halfedges
 template<typename MeshType>
-void
+bool
 set_boundary_vertex_halfedges(MeshType& mesh, HalfedgeId first_hid)
 {
     HalfedgeId curr_hid = first_hid;
+    std::size_t count{ 0 };
     do {
         HalfedgeId prev_hid = mesh.he_prev(curr_hid);
         VertexId va = mesh.he_to(prev_hid);
@@ -819,7 +820,9 @@ set_boundary_vertex_halfedges(MeshType& mesh, HalfedgeId first_hid)
             mesh.vertex_data(va).halfedge = mesh.he_twin(prev_hid);
         }
         curr_hid = mesh.he_next_twin(curr_hid);
+        count += 1;
     } while (curr_hid != first_hid);
+    return count != mesh.n_faces();
 }
 
 // Get triangulated mesh
@@ -884,7 +887,9 @@ triangulate_polygon(std::span<const double> points,
 {
     using namespace triangulation;
     auto [bdy_hid, mesh] = get_triangulated_mesh<CDT::MeshType>(points, is_horizontal);
-    set_boundary_vertex_halfedges(mesh, bdy_hid);
+    if (!set_boundary_vertex_halfedges(mesh, bdy_hid)) {
+        return {};
+    }
     for (auto v : mesh.vertices()) {
         v.prop().pt = { v.id.idx };
     }
