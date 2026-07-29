@@ -449,8 +449,15 @@ project_points_on_mesh(std::vector<std::array<double, N>>& points,
     tree.accelerate_distance_queries();
     std::unordered_map<gpf::FaceId, FaceInfo<N>> face_info_map;
     for (std::size_t pid = 0; pid < points.size(); pid++) {
-        auto closest_ret = tree.closest_point_and_primitive(to_kernel_point(points[pid]));
+        auto& pt = points[pid];
+        auto closest_ret = tree.closest_point_and_primitive(to_kernel_point(pt));
         auto fid = face_ids[std::distance(triangles.cbegin(), closest_ret.second)];
+        if constexpr (N == 3) {
+            const auto& project = closest_ret.first;
+            pt[0] = project[0];
+            pt[1] = project[1];
+            pt[2] = project[2];
+        }
         face_info_map[fid].point_indices.emplace_back(pid);
     }
 
@@ -609,7 +616,7 @@ struct FlipGeodesic
 
     void init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path);
     void add_wedge(const gpf::HalfedgeId ha, const gpf::HalfedgeId hb);
-    void shorten_locally();
+    bool shorten_locally();
     bool flip(const gpf::HalfedgeId hid) const;
     void replace_path(std::vector<gpf::HalfedgeId>&& new_path,
                       const gpf::HalfedgeId path_prev_prev_hid,
@@ -632,7 +639,10 @@ FlipGeodesic::perform(std::vector<gpf::HalfedgeId>&& raw_path)
     }
     init_wedge_queue(raw_path);
     while (!pq.empty()) {
-        shorten_locally();
+        if (!shorten_locally()) {
+            pq = {};
+            return {};
+        }
     }
     std::vector<gpf::HalfedgeId> result;
     result.reserve(raw_path.size());
@@ -663,6 +673,8 @@ FlipGeodesic::init_wedge_queue(const std::vector<gpf::HalfedgeId>& raw_path)
         mesh->halfedge_prop(h2).path_prev = h1;
         add_wedge(h1, h2);
     }
+    mesh->halfedge_prop(raw_path.front()).path_prev = {};
+    mesh->halfedge_prop(raw_path.back()).path_next = {};
 }
 
 inline void
@@ -700,7 +712,7 @@ FlipGeodesic::add_wedge(const gpf::HalfedgeId h1, const gpf::HalfedgeId h2)
     }
 }
 
-inline void
+inline bool
 FlipGeodesic::shorten_locally()
 {
     auto [angle, vertices, path_prev_hid, dir] = pq.top();
@@ -708,7 +720,7 @@ FlipGeodesic::shorten_locally()
     pq.pop();
     if (!path_next_hid.valid() || mesh->he_from(path_prev_hid) != vertices[0] ||
         mesh->he_to(path_prev_hid) != vertices[1] || mesh->he_to(path_next_hid) != vertices[2]) {
-        return;
+        return true;
     }
 
     const auto path_prev_prev_hid = mesh->halfedge_prop(path_prev_hid).path_prev;
@@ -722,6 +734,9 @@ FlipGeodesic::shorten_locally()
         if (curr_he.twin().id == prev_hid) {
             curr_he = curr_he.twin().next();
             continue;
+        }
+        if (curr_he.edge().prop().locked) {
+            return false;
         }
         if (flip(curr_he.id)) {
             curr_he = curr_he.next().twin();
@@ -748,15 +763,12 @@ FlipGeodesic::shorten_locally()
     mesh->halfedge_prop(path_prev_hid).unconnect();
     mesh->halfedge_prop(path_next_hid).unconnect();
     replace_path(std::move(new_path), path_prev_prev_hid, path_next_next_hid);
+    return true;
 }
 
 inline bool
 FlipGeodesic::flip(const gpf::HalfedgeId hid) const
 {
-    if (mesh->halfedge(hid).edge().prop().locked) {
-        return false;
-    }
-
     auto hac = hid;
     auto hca = mesh->he_twin(hac);
     auto hcd = mesh->he_next(hac);
@@ -1414,16 +1426,19 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                                               .aux_mesh{ &aux_mesh } };
 
         trace.path.push_back(point_vertices[polyline.front()]);
-        for (std::size_t i = 0; i + 1 < polyline.size(); i++) {
-            auto va = point_vertices[polyline[i]];
-            auto vb = point_vertices[polyline[i + 1]];
+        auto va = point_vertices[polyline[0]];
+        for (std::size_t i = 1; i < polyline.size(); i++) {
+            auto vb = point_vertices[polyline[i]];
             if (va == vb) {
                 continue;
             }
             auto local_path = flip_geodesic.perform(detail::shortest_patch_by_dijksta(
               aux_mesh, va, vb, [](auto e) { return false; }, [](auto e) { return e.prop().len; }));
-            for (const auto hid : std::move(local_path)) {
-                trace.trace_from_vertex(hid);
+            if (!local_path.empty()) {
+                for (const auto hid : std::move(local_path)) {
+                    trace.trace_from_vertex(hid);
+                }
+                va = vb;
             }
         }
         polyline_paths.push_back(std::move(trace.path));
