@@ -8,3 +8,5 @@ build-*/
 .cache
 .cazean
 compile_commands.json
+
+.zevria

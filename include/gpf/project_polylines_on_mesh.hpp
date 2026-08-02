@@ -6,7 +6,9 @@
 #include <cmath>
 #include <cstddef>
 #include <expected>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <numbers>
 #include <numeric>
@@ -400,13 +402,9 @@ triangulate_on_face(Mesh& mesh,
     }
 }
 
-template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
+template<std::size_t N, typename Mesh>
 auto
-project_points_on_mesh(std::vector<std::array<double, N>>& points,
-                       gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
-                       const double eps,
-                       std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
-                       std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
+prepare_projected_points(std::vector<std::array<double, N>>& points, Mesh& mesh, const double eps)
 {
     static_assert(N == 2 || N == 3);
 
@@ -467,6 +465,18 @@ project_points_on_mesh(std::vector<std::array<double, N>>& points,
         info.ccs =
           identify_points<N>(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps * eps);
     }
+    return std::make_tuple(std::move(face_info_map), std::move(point_vertices), std::move(edge_to_points_map));
+}
+
+template<std::size_t N, typename VP, typename HP, typename EP, typename FP>
+auto
+project_points_on_mesh(std::vector<std::array<double, N>>& points,
+                       gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
+                       const double eps,
+                       std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
+                       std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
+{
+    auto [face_info_map, point_vertices, edge_to_points_map] = prepare_projected_points<N>(points, mesh, eps);
 
     // add ccs for all triangles sharing this edge to prepare triangulation
     for (const auto eid : edge_to_points_map | views::keys) {
@@ -1385,13 +1395,13 @@ auto
 project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
                           const std::vector<std::vector<std::size_t>>& polylines,
                           gpf::ManifoldMesh<VP, HP, EP, FP>& mesh,
+                          const double eps,
                           std::unordered_map<gpf::FaceId, gpf::FaceId>* face_parent_map = nullptr,
                           std::unordered_map<gpf::EdgeId, gpf::EdgeId>* edge_parent_map = nullptr)
 {
     using Mesh = gpf::ManifoldMesh<VP, HP, EP, FP>;
 
-    constexpr double EPS = 1e-3;
-    auto point_vertices = detail::project_points_on_mesh<N>(points, mesh, EPS, face_parent_map, edge_parent_map);
+    auto point_vertices = detail::project_points_on_mesh<N>(points, mesh, eps, face_parent_map, edge_parent_map);
     mesh.update_vertex_halfedges();
 
     detail::AuxiliaryMesh aux_mesh;
@@ -1449,9 +1459,9 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
     std::vector<gpf::VertexId> edge_point_vertices(edge_points.size(), gpf::VertexId{});
     for (std::size_t pid = 0; pid < edge_points.size(); pid++) {
         const auto& point = edge_points[pid];
-        if (point.t < EPS) {
+        if (point.t < eps) {
             edge_point_vertices[pid] = mesh.edge(point.eid).halfedge().from().id;
-        } else if (point.t > 1.0 - EPS) {
+        } else if (point.t > 1.0 - eps) {
             edge_point_vertices[pid] = mesh.edge(point.eid).halfedge().to().id;
         } else {
             edge_to_points_map[point.eid].push_back(pid);
@@ -1489,7 +1499,7 @@ project_polylines_on_mesh(std::vector<std::array<double, N>>& points,
           [&edge_points](std::size_t pid) { return edge_points[pid].pt; },
           point_indices,
           edge_point_vertices,
-          EPS,
+          eps,
           edge_parent_map);
     }
 

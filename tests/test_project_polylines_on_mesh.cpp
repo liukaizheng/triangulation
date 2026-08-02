@@ -119,7 +119,7 @@ test_project_polylines_on_mesh_2d_points()
     }
     const std::vector<std::vector<std::size_t>> polylines{ { 0, 1 } };
 
-    const auto [point_vertices, paths] = gpf::project_polylines_on_mesh<2>(points, polylines, mesh);
+    const auto [point_vertices, paths] = gpf::project_polylines_on_mesh<2>(points, polylines, mesh, 1e-3);
     write_obj("project_mesh.obj", mesh);
     assert(paths.size() == 1);
     assert(!paths.front().empty());
