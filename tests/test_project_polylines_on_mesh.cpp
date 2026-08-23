@@ -4,6 +4,8 @@
 #include <gpf/triangulation.hpp>
 
 #include <cassert>
+#include <fstream>
+#include <ostream>
 #include <print>
 #include <random>
 #include <ranges>
@@ -139,6 +141,47 @@ test_project_polylines_on_mesh_2d_points()
 
     assert(is_close(points[0][0], 0.75) && is_close(points[0][1], 0.0));
     assert(is_close(points[1][0], 0.1) && is_close(points[1][1], 0.8));
+}
+
+void
+test_prepare_projected_points_with_mbvh()
+{
+    Mesh3d mesh = Mesh3d::new_in(std::vector<std::vector<std::size_t>>{ { 0, 1, 2 }, { 2, 1, 3 } });
+    mesh.vertex_prop(gpf::VertexId{ 0 }).pt = { 0.0, 0.0, 0.0 };
+    mesh.vertex_prop(gpf::VertexId{ 1 }).pt = { 1.0, 0.0, 0.0 };
+    mesh.vertex_prop(gpf::VertexId{ 2 }).pt = { 0.0, 1.0, 0.0 };
+    mesh.vertex_prop(gpf::VertexId{ 3 }).pt = { 1.0, 1.0, 0.0 };
+
+    std::vector<std::array<double, 3>> points{
+        { 0.25, 0.25, 2.0 },
+        { -0.25, -0.25, 1.0 },
+        { 0.4, -0.25, 1.0 },
+        { 0.75, 0.75, -2.0 },
+    };
+    const auto [face_info_map, point_vertices, edge_to_points_map] =
+      gpf::detail::prepare_projected_points<3>(points, mesh, 1e-6);
+
+    assert(is_close(Eigen::Vector3d::Map(points[0].data()), Eigen::Vector3d{ 0.25, 0.25, 0.0 }));
+    assert(is_close(Eigen::Vector3d::Map(points[1].data()), Eigen::Vector3d{ 0.0, 0.0, 0.0 }));
+    assert(is_close(Eigen::Vector3d::Map(points[2].data()), Eigen::Vector3d{ 0.4, 0.0, 0.0 }));
+    assert(is_close(Eigen::Vector3d::Map(points[3].data()), Eigen::Vector3d{ 0.75, 0.75, 0.0 }));
+
+    assert(!point_vertices[0].valid());
+    assert(point_vertices[1] == gpf::VertexId{ 0 });
+    assert(!point_vertices[2].valid());
+    assert(!point_vertices[3].valid());
+
+    const auto edge_id = mesh.he_edge(mesh.he_from_vertices(gpf::VertexId{ 0 }, gpf::VertexId{ 1 }));
+    assert(edge_to_points_map.at(edge_id) == std::vector<std::size_t>{ 2 });
+
+    assert(face_info_map.at(gpf::FaceId{ 0 }).point_indices == std::vector<std::size_t>{ 0 });
+    assert(face_info_map.at(gpf::FaceId{ 1 }).point_indices == std::vector<std::size_t>{ 3 });
+    for (const auto& face_info : face_info_map | std::views::values) {
+        assert(face_info.barycentric_coordinates.size() == face_info.point_indices.size());
+        for (const auto& barycentric : face_info.barycentric_coordinates) {
+            assert(std::abs(barycentric[0] + barycentric[1] + barycentric[2] - 1.0) < 1e-14);
+        }
+    }
 }
 
 void

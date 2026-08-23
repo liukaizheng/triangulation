@@ -58,7 +58,9 @@ if(GPF_ALGORITHM_BUILD_TESTS)
     tests/test_collapse_short_edges_2d.cpp
     tests/test_orthtree.cpp
     tests/test_project_polylines_on_mesh.cpp
+    tests/test_find_closest_points.cpp
   )
   target_link_libraries(gpf_algorithm_tests PRIVATE gpf::algorithm)
+  target_compile_options(gpf_algorithm_tests PRIVATE -march=native)
   add_test(NAME gpf_algorithm_tests COMMAND gpf_algorithm_tests)
 endif()

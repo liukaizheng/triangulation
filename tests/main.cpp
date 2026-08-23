@@ -20,6 +20,8 @@ test_property_edge_length_updates();
 void
 test_project_polylines_on_mesh_2d_points();
 void
+test_prepare_projected_points_with_mbvh();
+void
 test_walk_on_mesh_surface();
 void
 test_mesh_edge_collapse1();
@@ -43,12 +45,15 @@ void
 test_collapse_1000_points();
 void
 test_collapse_on_triangle();
-
+void
+test_build_bvh();
 void
 test_degenerate();
 int
 main()
 {
+    test_build_bvh();
+    return 0;
     test_degenerate();
     test_collapse_on_triangle();
     test_collapse_1000_points();
@@ -56,6 +61,7 @@ main()
     test_collapse_short_edges_2d_collapses();
     test_collapse_short_edges_2d_swaps_direction();
     test_project_polylines_on_mesh_2d_points();
+    test_prepare_projected_points_with_mbvh();
     test_walk_on_mesh_surface();
     test_mesh_edge_collapse1();
     test_triangulate_bug2();

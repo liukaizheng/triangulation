@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstddef>
 #include <expected>
-#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -22,18 +21,12 @@
 #include <variant>
 #include <vector>
 
-#include <CGAL/AABB_traits_2.h>
-#include <CGAL/AABB_traits_3.h>
-#include <CGAL/AABB_tree.h>
-#include <CGAL/AABB_triangle_primitive_2.h>
-#include <CGAL/AABB_triangle_primitive_3.h>
-#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
-
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
 #include <predicates/predicates.hpp>
 
+#include <gpf/find_closest_points.hpp>
 #include <gpf/ids.hpp>
 #include <gpf/mesh.hpp>
 #include <gpf/mesh_property.hpp>
@@ -162,6 +155,7 @@ struct FaceInfo
 {
     FaceCoords<N> ccs;
     std::vector<std::size_t> point_indices;
+    std::vector<std::array<double, 3>> barycentric_coordinates;
 };
 
 inline bool
@@ -189,11 +183,14 @@ auto
 identify_points(Mesh& mesh,
                 const gpf::FaceId fid,
                 std::vector<std::array<double, N>>& all_points,
+                std::vector<std::array<double, 3>>& barycentric_coordinates,
                 std::unordered_map<gpf::EdgeId, std::vector<std::size_t>>& edge_to_points_map,
                 std::vector<std::size_t>& face_point_indices,
                 std::vector<gpf::VertexId>& point_vertices,
                 const double sq_eps)
 {
+    assert(barycentric_coordinates.size() == face_point_indices.size());
+
     auto face = mesh.face(fid);
     auto ccs = make_face_coords<N>(mesh, fid);
 
@@ -232,11 +229,13 @@ identify_points(Mesh& mesh,
         if (!finished) {
             if (idx != i) {
                 face_point_indices[idx] = pid;
+                barycentric_coordinates[idx] = barycentric_coordinates[i];
             }
             idx += 1;
         }
     }
     face_point_indices.resize(idx);
+    barycentric_coordinates.resize(idx);
     return ccs;
 }
 
@@ -408,62 +407,69 @@ prepare_projected_points(std::vector<std::array<double, N>>& points, Mesh& mesh,
 {
     static_assert(N == 2 || N == 3);
 
-    using Kernel = CGAL::Exact_predicates_inexact_constructions_kernel;
-    using Point = std::conditional_t<N == 2, Kernel::Point_2, Kernel::Point_3>;
-    using Triangle = std::conditional_t<N == 2, Kernel::Triangle_2, Kernel::Triangle_3>;
-    using TreeIterator = std::vector<Triangle>::const_iterator;
-    using TreePrimitive = std::conditional_t<N == 2,
-                                             CGAL::AABB_triangle_primitive_2<Kernel, TreeIterator>,
-                                             CGAL::AABB_triangle_primitive_3<Kernel, TreeIterator>>;
-    using TreeTraits = std::
-      conditional_t<N == 2, CGAL::AABB_traits_2<Kernel, TreePrimitive>, CGAL::AABB_traits_3<Kernel, TreePrimitive>>;
-    using Tree = CGAL::AABB_tree<TreeTraits>;
+    std::vector<double> tree_points(mesh.n_vertices_capacity() * N);
+    for (const auto vertex : mesh.vertices()) {
+        assert(vertex.id.idx < mesh.n_vertices_capacity());
+        VectorNd<N>::Map(tree_points.data() + vertex.id.idx * N) = VectorNd<N>::Map(vertex.prop().pt.data());
+    }
 
-    auto to_kernel_point = [](const std::array<double, N>& pt) {
-        if constexpr (N == 2) {
-            return Point(pt[0], pt[1]);
-        } else {
-            return Point(pt[0], pt[1], pt[2]);
-        }
-    };
-
-    std::vector<Triangle> triangles;
+    std::vector<std::size_t> triangle_indices;
     std::vector<gpf::FaceId> face_ids;
-    triangles.reserve(mesh.n_faces());
+    triangle_indices.reserve(mesh.n_faces() * 3);
     face_ids.reserve(mesh.n_faces());
 
     for (auto face : mesh.faces()) {
         auto he = face.halfedge();
-        const auto& pa = he.to().prop().pt;
+        triangle_indices.emplace_back(he.to().id.idx);
         he = he.next();
-        const auto& pb = he.to().prop().pt;
+        triangle_indices.emplace_back(he.to().id.idx);
         he = he.next();
-        const auto& pc = he.to().prop().pt;
-        triangles.emplace_back(to_kernel_point(pa), to_kernel_point(pb), to_kernel_point(pc));
+        triangle_indices.emplace_back(he.to().id.idx);
         face_ids.emplace_back(face.id);
     }
 
-    Tree tree(triangles.begin(), triangles.end());
-    tree.accelerate_distance_queries();
     std::unordered_map<gpf::FaceId, FaceInfo<N>> face_info_map;
-    for (std::size_t pid = 0; pid < points.size(); pid++) {
-        auto& pt = points[pid];
-        auto closest_ret = tree.closest_point_and_primitive(to_kernel_point(pt));
-        auto fid = face_ids[std::distance(triangles.cbegin(), closest_ret.second)];
-        if constexpr (N == 3) {
-            const auto& project = closest_ret.first;
-            pt[0] = project[0];
-            pt[1] = project[1];
-            pt[2] = project[2];
-        }
-        face_info_map[fid].point_indices.emplace_back(pid);
-    }
-
     std::vector<gpf::VertexId> point_vertices(points.size(), gpf::VertexId{});
     std::unordered_map<gpf::EdgeId, std::vector<std::size_t>> edge_to_points_map;
+    if (points.empty() || triangle_indices.empty()) {
+        assert(points.empty() || !triangle_indices.empty());
+        return std::make_tuple(std::move(face_info_map), std::move(point_vertices), std::move(edge_to_points_map));
+    }
+
+    const auto binary_bvh = bvh::build_bvh<N, double>(tree_points, triangle_indices);
+    const mbvh::MBVHTree<N, double> mbvh_tree{ binary_bvh };
+    for (std::size_t pid = 0; pid < points.size(); pid++) {
+        auto& pt = points[pid];
+        BoundingSphere<N, double> sphere{ std::span<const double, N>{ pt.data(), N } };
+        Interaction<N, double> interaction;
+        const bool found = mbvh_tree.find_closest_point_from_node(sphere, interaction, 0);
+        assert(found);
+        if (!found) {
+            continue;
+        }
+
+        const auto primitive_idx = interaction.primitive_index;
+        assert(primitive_idx < face_ids.size());
+        const auto fid = face_ids[primitive_idx];
+        if constexpr (N == 3) {
+            VectorNd<N>::Map(pt.data()) = VectorNd<N>::Map(interaction.p.data());
+        }
+
+        auto& face_info = face_info_map[fid];
+        face_info.point_indices.emplace_back(pid);
+        face_info.barycentric_coordinates.push_back(
+          { interaction.uv[0], interaction.uv[1], 1.0 - interaction.uv[0] - interaction.uv[1] });
+    }
+
     for (auto& [fid, info] : face_info_map) {
-        info.ccs =
-          identify_points<N>(mesh, fid, points, edge_to_points_map, info.point_indices, point_vertices, eps * eps);
+        info.ccs = identify_points<N>(mesh,
+                                      fid,
+                                      points,
+                                      info.barycentric_coordinates,
+                                      edge_to_points_map,
+                                      info.point_indices,
+                                      point_vertices,
+                                      eps * eps);
     }
     return std::make_tuple(std::move(face_info_map), std::move(point_vertices), std::move(edge_to_points_map));
 }

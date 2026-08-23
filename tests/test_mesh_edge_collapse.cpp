@@ -13,6 +13,11 @@
 #include <utility>
 #include <vector>
 
+#include <CGAL/AABB_traits_3.h>
+#include <CGAL/AABB_tree.h>
+#include <CGAL/AABB_triangle_primitive_3.h>
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+
 #include <Eigen/Dense>
 
 template<typename Mesh>

@@ -4,44 +4,47 @@
 #include <array>
 #include <cstddef>
 #include <limits>
+#include <type_traits>
 
 namespace gpf {
 
-template<std::size_t N>
+template<std::size_t N, typename Scalar = double>
 struct BBox
 {
-    std::array<double, N> lo;
-    std::array<double, N> hi;
+    static_assert(std::is_floating_point_v<Scalar>);
+
+    std::array<Scalar, N> lo;
+    std::array<Scalar, N> hi;
 
     BBox()
     {
-        lo.fill(std::numeric_limits<double>::max());
-        hi.fill(std::numeric_limits<double>::min());
+        lo.fill(std::numeric_limits<Scalar>::max());
+        hi.fill(std::numeric_limits<Scalar>::lowest());
     }
 
     // Compiler-generated copy/move constructors are sufficient:
-    // BBox only holds std::array<double, N> (fixed-size, inline storage, no indirection),
+    // BBox only holds fixed-size std::arrays (inline storage, no indirection),
     // so moving is identical to copying — there is no heap pointer to steal.
-    BBox(std::array<double, N> lo, std::array<double, N> hi) noexcept
+    BBox(std::array<Scalar, N> lo, std::array<Scalar, N> hi) noexcept
       : lo(lo)
       , hi(hi)
     {
     }
 
-    std::array<double, N>& min_bound() { return lo; }
-    const std::array<double, N>& min_bound() const { return lo; }
-    std::array<double, N>& max_bound() { return hi; }
-    const std::array<double, N>& max_bound() const { return hi; }
+    std::array<Scalar, N>& min_bound() { return lo; }
+    const std::array<Scalar, N>& min_bound() const { return lo; }
+    std::array<Scalar, N>& max_bound() { return hi; }
+    const std::array<Scalar, N>& max_bound() const { return hi; }
 
-    double min_coord(std::size_t i) const { return lo[i]; }
-    double max_coord(std::size_t i) const { return hi[i]; }
+    Scalar min_coord(std::size_t i) const { return lo[i]; }
+    Scalar max_coord(std::size_t i) const { return hi[i]; }
 
     std::size_t longest_axis() const
     {
         std::size_t best = 0;
-        double best_len = hi[0] - lo[0];
+        Scalar best_len = hi[0] - lo[0];
         for (std::size_t i = 1; i < N; ++i) {
-            double len = hi[i] - lo[i];
+            Scalar len = hi[i] - lo[i];
             if (len > best_len) {
                 best = i;
                 best_len = len;
@@ -50,11 +53,20 @@ struct BBox
         return best;
     }
 
-    BBox& operator+=(const BBox& o)
+    BBox& operator+=(const BBox& o) noexcept
     {
         for (std::size_t i = 0; i < N; ++i) {
             lo[i] = std::min(lo[i], o.lo[i]);
             hi[i] = std::max(hi[i], o.hi[i]);
+        }
+        return *this;
+    }
+
+    BBox& add(const Scalar* pt) noexcept
+    {
+        for (std::size_t i = 0; i < N; ++i) {
+            lo[i] = std::min(lo[i], pt[i]);
+            hi[i] = std::max(hi[i], pt[i]);
         }
         return *this;
     }
