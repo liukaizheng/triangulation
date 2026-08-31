@@ -1,4 +1,5 @@
 #pragma once
+#include <gpf/encoded_array.hpp>
 #include <gpf/mesh.hpp>
 #include <initializer_list>
 #include <predicates/generic_point_2d.hpp>
@@ -439,7 +440,7 @@ struct CDT
     };
     struct HalfedgeProp
     {
-        std::size_t mark{ gpf::kInvalidIndex };
+        gpf::EncodedArray mark;
     };
     using MeshType = ManifoldMesh<VertexProp, HalfedgeProp, gpf::Empty, gpf::Empty>;
 
@@ -546,7 +547,7 @@ struct CDT
             }
         } else {
             HalfedgeId split_hid = mesh.he_next(hid);
-            if (mesh.halfedge_prop(split_hid).mark == kInvalidIndex) {
+            if (mesh.halfedge_prop(split_hid).mark.empty()) {
                 return hid;
             } else {
                 auto [_, new_hid] = split_edge(split_hid, mark);
@@ -594,7 +595,7 @@ struct CDT
                     flip_hid = mesh.he_twin_next(flip_hid);
                 }
 
-                if (mesh.halfedge_prop(flip_hid).mark != kInvalidIndex) {
+                if (!mesh.halfedge_prop(flip_hid).mark.empty()) {
                     auto [new_hid1, new_hid2] = split_edge(flip_hid, mark);
                     fixup(mesh.he_twin(new_hid1), false);
                     fixup(mesh.he_next(new_hid1), true);
@@ -614,7 +615,7 @@ struct CDT
     void fixup(HalfedgeId hid, bool left_side)
     {
         HalfedgeId flip_hid = mesh.he_next(hid);
-        if (mesh.halfedge_prop(flip_hid).mark != kInvalidIndex)
+        if (!mesh.halfedge_prop(flip_hid).mark.empty())
             return;
 
         HalfedgeId twin_flip_hid = mesh.he_twin(flip_hid);
@@ -655,8 +656,9 @@ struct CDT
 
         VertexId left_vid = mesh.he_to(hid);
 
-        std::size_t edge_mark = mesh.halfedge_prop(hid).mark;
-        assert(edge_mark != kInvalidIndex);
+        const gpf::EncodedArray edge_marks = mesh.halfedge_prop(hid).mark;
+        assert(!edge_marks.empty());
+        const std::size_t edge_mark = *edge_marks.range().begin();
 
         VertexId new_vid = mesh.split_edge(mesh.he_edge(hid));
 
@@ -667,10 +669,9 @@ struct CDT
 
         HalfedgeId new_hid = mesh.v_halfedge(new_vid);
 
-        if (mesh.he_to(new_hid) == left_vid) {
-            set_edge_mark(new_hid, edge_mark);
-        } else {
-            set_edge_mark(new_hid, twin_index(edge_mark));
+        const bool same_orientation = mesh.he_to(new_hid) == left_vid;
+        for (const std::size_t mark : edge_marks.range()) {
+            set_edge_mark(new_hid, same_orientation ? mark : twin_index(mark));
         }
 
         HalfedgeId new_hid1 = mesh.split_face(fid, bottom_vid, new_vid);
@@ -685,11 +686,8 @@ struct CDT
     void set_edge_mark(HalfedgeId hid, std::size_t mark)
     {
         auto he = mesh.halfedge(hid);
-        auto& he_prop = he.prop();
-        if (he_prop.mark == kInvalidIndex) {
-            he_prop.mark = mark;
-            he.twin().prop().mark = gpf::twin_index(mark);
-        }
+        he.prop().mark.push(mark);
+        he.twin().prop().mark.push(gpf::twin_index(mark));
     }
 
     // Orient2d for Point2D
@@ -743,13 +741,21 @@ struct CDT
                 ++queue_idx;
 
                 for (const auto& he : mesh.face(curr_fid).halfedges()) {
-                    HalfedgeId hid = he.id;
-                    std::size_t mark = he.prop().mark;
+                    const auto& marks = he.prop().mark;
 
-                    // Inner segments (mark index >= n_contour_segments) don't block traversal
-                    bool is_inner_segment = (mark != kInvalidIndex) && ((mark >> 1) >= n_contour_segments);
+                    bool has_contour_mark = false;
+                    bool has_negative_contour_mark = false;
+                    for (const std::size_t mark : marks.range()) {
+                        if ((mark >> 1) < n_contour_segments) {
+                            has_contour_mark = true;
+                            if (gpf::is_negative(mark)) {
+                                has_negative_contour_mark = true;
+                            }
+                        }
+                    }
 
-                    if (mark == kInvalidIndex || is_inner_segment) {
+                    // Empty and all-inner-mark edges don't block traversal.
+                    if (!has_contour_mark) {
                         FaceId adj_fid = he.twin().face().id;
                         if (visited[adj_fid.idx])
                             continue;
@@ -759,7 +765,7 @@ struct CDT
                             keep = false;
                         }
                         queue.push_back(adj_fid);
-                    } else if (gpf::is_negative(mark)) {
+                    } else if (has_negative_contour_mark) {
                         keep = false;
                     }
                 }

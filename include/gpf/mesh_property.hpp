@@ -46,6 +46,12 @@ concept HasPositionProperty = requires(V v) {
     { std::span<const double, N>{ v.prop().pt } };
 };
 
+// Concept for vertex with writable normal property that can be viewed as span<double, 3>
+template<typename V>
+concept HasNormalProperty = requires(V v) {
+    { std::span<double, 3>{ v.prop().normal } };
+};
+
 // Concept for edge with squared length property
 template<typename E>
 concept HasSquaredLengthProperty = requires(E e) {
@@ -237,6 +243,61 @@ update_vertex_angle_sums(Mesh& mesh)
     for (auto vertex : mesh.vertices()) {
         update_vertex_angle_sum(vertex);
     }
+}
+
+template<class Mesh, class PositionSpan>
+    requires ReturnsPositionSpan<3, PositionSpan, VertexHandle<Mesh, false>> &&
+             HasNormalProperty<VertexHandle<Mesh, false>>
+void
+update_vertex_normal(VertexHandle<Mesh, false> vertex, PositionSpan pos_span)
+{
+    const auto p0_span = pos_span(vertex);
+    const Eigen::Vector3d p0 = Eigen::Vector3d::Map(p0_span.data());
+    Eigen::Vector3d accumulator = Eigen::Vector3d::Zero();
+
+    for (auto hb : vertex.incoming_halfedges()) {
+        if (!hb.face().id.valid()) {
+            continue;
+        }
+
+        auto ha = hb.next();
+
+        const auto p1_span = pos_span(ha.to());
+        const auto p2_span = pos_span(hb.from());
+        const Eigen::Vector3d p1 = Eigen::Vector3d::Map(p1_span.data());
+        const Eigen::Vector3d p2 = Eigen::Vector3d::Map(p2_span.data());
+        accumulator += 0.5 * (p1 - p0).cross(p2 - p0);
+    }
+
+    std::span<double, 3> normal{ vertex.prop().normal };
+    Eigen::Vector3d::Map(normal.data()) = accumulator.normalized();
+}
+
+template<class Mesh>
+    requires HasPositionProperty<VertexHandle<Mesh, false>, 3> && HasNormalProperty<VertexHandle<Mesh, false>>
+void
+update_vertex_normal(VertexHandle<Mesh, false> vertex)
+{
+    update_vertex_normal(vertex, position_span<3, Mesh>);
+}
+
+template<class Mesh, class PositionSpan>
+    requires ReturnsPositionSpan<3, PositionSpan, VertexHandle<Mesh, false>> &&
+             HasNormalProperty<VertexHandle<Mesh, false>>
+void
+update_vertex_normals(Mesh& mesh, PositionSpan pos_span)
+{
+    for (auto vertex : mesh.vertices()) {
+        update_vertex_normal(vertex, pos_span);
+    }
+}
+
+template<class Mesh>
+    requires HasPositionProperty<VertexHandle<Mesh, false>, 3> && HasNormalProperty<VertexHandle<Mesh, false>>
+void
+update_vertex_normals(Mesh& mesh)
+{
+    update_vertex_normals(mesh, position_span<3, Mesh>);
 }
 
 template<class Mesh>

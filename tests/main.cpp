@@ -2,6 +2,16 @@
 #include <iostream>
 
 void
+test_encoded_array_iteration();
+void
+test_exp_map();
+// void
+// test_exp_map_planar_projection_is_isometric();
+// void
+// test_exp_map_existing_center_radius_and_components();
+// void
+// test_exp_map_cylinder_matches_unrolled_patch();
+void
 test_triangulate_bug1();
 void
 test_triangulate_bug2();
@@ -52,7 +62,13 @@ test_degenerate();
 int
 main()
 {
-    test_build_bvh();
+    test_encoded_array_iteration();
+    test_exp_map();
+    // test_exp_map_planar_projection_is_isometric();
+    // test_exp_map_existing_center_radius_and_components();
+    // test_exp_map_cylinder_matches_unrolled_patch();
+    // test_build_bvh();
+    test_cdt_with_intersections();
     return 0;
     test_degenerate();
     test_collapse_on_triangle();
@@ -66,7 +82,6 @@ main()
     test_mesh_edge_collapse1();
     test_triangulate_bug2();
     test_triangulate_bug1();
-    test_cdt_with_intersections();
     test_triangulate_10000_random_points();
     test_triangulate_points_simple();
     test_triangulate_points_square();

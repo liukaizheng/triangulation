@@ -51,6 +51,8 @@ if(GPF_ALGORITHM_BUILD_TESTS)
   add_executable(
     gpf_algorithm_tests
     tests/main.cpp
+    tests/test_exp_map.cpp
+    tests/test_encoded_array.cpp
     tests/test_triangulation.cpp
     tests/test_mesh_property.cpp
     tests/test_mesh_edge_collapse.cpp
